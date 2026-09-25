@@ -1,0 +1,13 @@
+# Project: Blindspot - Local AI Code Reviewer
+We are building a hybrid local developer tool consisting of a Node CLI and a Next.js App Router dashboard.
+
+**Tech Stack:**
+- **Framework:** Next.js 15 (App Router) + React 19
+- **UI:** Tailwind CSS, shadcn/ui, Lucide Icons
+- **CLI:** Node.js, `commander`, `simple-git`, `cli-progress`
+- **AI/Inference:** `node-llama-cpp` (for native, zero-config SLM execution).
+
+**Core Rules:**
+1. NO cloud AI dependencies (No OpenAI, No Anthropic). All inference runs locally.
+2. Use `node-llama-cpp` natively in Next.js API routes. Utilize its `LlamaChatSession` and built-in function-calling capabilities to create the agentic loop.
+3. The Next.js API must load the local GGUF model and expose tools (like file reading) directly to the `node-llama-cpp` session.

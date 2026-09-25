@@ -1,0 +1,22 @@
+{
+  "name": "blindspot",
+  "version": "0.1.0",
+  "private": true,
+  "bin": {
+    "blindspot": "./cli/index.js"
+  },
+  "scripts": {
+    "start": "node cli/index.js",
+    "review": "node cli/index.js --provider bob --export-logs",
+    "review:llama": "node cli/index.js --provider llama --export-logs",
+    "eval": "node evals/run.mjs"
+  },
+  "dependencies": {
+    "cli-progress": "^3.12.0",
+    "commander": "^15.0.0",
+    "dotenv": "^18.0.3",
+    "node-llama-cpp": "^3.19.0",
+    "pdf-parse": "^1.1.1",
+    "simple-git": "^3.36.0"
+  }
+}

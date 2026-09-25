@@ -1,0 +1,41 @@
+name: Blindspot AI Code Reviewer
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run Blindspot PR Review
+        env:
+          ENGINE_PROVIDER: 'bob'
+          BOB_API_KEY: ${{ secrets.BOB_API_KEY }}
+          BOB_LIVE_API: 'true'
+        run: |
+          node cli/index.js --provider bob --export-logs
+
+      - name: Post PR Review Comment
+        uses: marocchino/sticky-pull-request-comment@v2
+        if: always()
+        with:
+          path: blindspot-report.md
+          header: blindspot-architectural-review
