@@ -33,6 +33,7 @@ jobs:
         run: |
           git fetch origin ${{ github.event.pull_request.base.ref }}
           git reset origin/${{ github.event.pull_request.base.ref }}
+          git add -A
           node cli/index.js --provider bob --export-logs
 
       - name: Post PR Review Comment
