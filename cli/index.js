@@ -472,18 +472,54 @@ async function launchDiffViewer(gitRoot, markdown) {
     console.log(`${YELLOW}No suggestion blocks in scan report — showing demo findings from this branch.${RESET}`);
   }
 
-  // ── 2. Write self-contained HTML file ─────────────────────────────────────
-  const htmlPath = path.join(gitRoot, DIFF_HTML_FILENAME);
+  // ── 2. Build the HTML ──────────────────────────────────────────────────────
   const html = buildDiffHtml(findings);
-  await fsp.writeFile(htmlPath, html, "utf8");
-  await ensureGitignoreEntry(gitRoot, DIFF_HTML_FILENAME);
 
-  // ── 3. Open inside IDE — no server, no hanging process ────────────────────
-  openInIde(htmlPath);
+  // ── 3. Serve once over HTTP, open in IDE, then shut down ──────────────────
+  // Simple Browser in Cursor/VS Code only loads http:// URLs (not file://).
+  // We spin up a minimal one-shot server: it serves the HTML to the first
+  // request then closes — the CLI exits as soon as the browser fetches the page.
+  const viewerUrl = await serveOnce(html);
+  openInIde(viewerUrl);
 
   console.log(`\n${GREEN}✅ Diff viewer opened — ${findings.length} issue(s)${usingDemo ? " (demo)" : ""}${RESET}`);
-  console.log(`   File: ${htmlPath}\n`);
-  // CLI exits immediately — no await, no server to keep alive
+  console.log(`   ${viewerUrl}\n`);
+}
+
+// Spin up an HTTP server that serves `html` to exactly ONE GET request,
+// then shuts itself down. Returns the URL as soon as it's listening.
+// server.unref() ensures the Node process is never held open by this server —
+// it will exit naturally once all other async work is done.
+function serveOnce(html) {
+  return new Promise((resolve, reject) => {
+    const server = http.createServer((req, res) => {
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Content-Length": Buffer.byteLength(html),
+        "X-Frame-Options": "SAMEORIGIN",
+        "Content-Security-Policy": "default-src 'self' 'unsafe-inline'",
+      });
+      res.end(html);
+      res.on("finish", () => {
+        // Destroy all open sockets immediately so the server closes at once
+        if (typeof server.closeAllConnections === "function") {
+          server.closeAllConnections();
+        }
+        server.close();
+      });
+    });
+
+    server.on("error", reject);
+
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address();
+      // unref() removes this server from the event-loop ref count — the process
+      // exits as soon as everything else (openInIde, console.log) finishes,
+      // even if the browser hasn't fetched the page yet.
+      server.unref();
+      resolve(`http://127.0.0.1:${port}`);
+    });
+  });
 }
 
 // ── Parse findings from scan markdown ────────────────────────────────────────
@@ -681,13 +717,12 @@ show(0);
 </html>`;
 }
 
-// ── Open a local file inside the IDE's Simple Browser panel ──────────────────
-// Uses the `vscode://` URI scheme understood by VS Code, Cursor, and Windsurf.
-// The `code --open-url` / `cursor --open-url` CLI triggers it without opening
-// an external browser window. The CLI exits immediately after — no server.
-function openInIde(filePath) {
-  const fileUrl = "file:///" + filePath.replace(/\\/g, "/");
-  const ideUri  = `vscode://vscode.simpleBrowser/show?url=${encodeURIComponent(fileUrl)}`;
+// ── Open a URL inside the IDE's Simple Browser panel ─────────────────────────
+// Sends a vscode://vscode.simpleBrowser/show?url=<http URL> URI to the IDE.
+// Cursor, VS Code, and Windsurf all handle this via their --open-url CLI flag,
+// which opens a Simple Browser tab inside the editor — no external window.
+function openInIde(url) {
+  const ideUri = `vscode://vscode.simpleBrowser/show?url=${encodeURIComponent(url)}`;
 
   const cliCandidates = ["cursor", "code", "windsurf"];
   for (const cli of cliCandidates) {
@@ -699,10 +734,11 @@ function openInIde(filePath) {
     }
   }
 
-  // Fallback: print the URI as a clickable link in the integrated terminal.
-  // VS Code/Cursor terminal renders vscode:// links as clickable.
-  console.log(`\n${YELLOW}Click to open the diff viewer inside your IDE:${RESET}`);
+  // Fallback: print as a clickable vscode:// link in the integrated terminal
+  console.log(`\n${YELLOW}Ctrl+click to open the diff viewer inside your IDE:${RESET}`);
   console.log(`  ${ideUri}`);
+  console.log(`\n  Or open Simple Browser manually and enter:`);
+  console.log(`  ${url}`);
 }
 
 const program = new Command();
