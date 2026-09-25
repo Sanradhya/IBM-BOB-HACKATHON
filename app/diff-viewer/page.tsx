@@ -1,9 +1,12 @@
+import { promises as fsp } from "fs";
+import path from "path";
 import FileDiffViewerPage, { type DiffFile } from "./FileDiffViewerPage";
 
-// Static demo data — each entry represents one detected issue in this branch.
-// "originalCode" is the actual buggy code; "fixedCode" is the corrected version.
+// Force dynamic rendering so the server always reads the latest findings file
+export const dynamic = "force-dynamic";
+
+// ── Demo fallback data (shown when no live scan findings are present) ─────────
 const DEMO_FILES: DiffFile[] = [
-  // ─── lib/auth.js ──────────────────────────────────────────────────────────
   {
     filePath: "lib/auth.js",
     title: "Broken-hash password storage (MD5)",
@@ -60,11 +63,9 @@ if (!JWT_SECRET) throw new Error("JWT_SECRET environment variable is not set");`
   return eval(configStr);
 }`,
     fixedCode: `function parseConfig(configStr) {
-  return JSON.parse(configStr); // Only valid JSON; throws on invalid input
+  return JSON.parse(configStr);
 }`,
   },
-
-  // ─── lib/dataProcessor.js ─────────────────────────────────────────────────
   {
     filePath: "lib/dataProcessor.js",
     title: "Off-by-one error in array loop",
@@ -92,8 +93,7 @@ if (!JWT_SECRET) throw new Error("JWT_SECRET environment variable is not set");`
     title: "Array mutation instead of copy in removeDuplicates",
     severity: "Medium",
     description:
-      "splice() mutates the original array passed by the caller, producing " +
-      "unexpected side-effects. Work on a shallow copy with slice() instead.",
+      "splice() mutates the original array passed by the caller. Work on a copy instead.",
     originalCode: `function removeDuplicates(items) {
   for (let i = 0; i < items.length; i++) {
     for (let j = i + 1; j < items.length; j++) {
@@ -106,7 +106,7 @@ if (!JWT_SECRET) throw new Error("JWT_SECRET environment variable is not set");`
   return items;
 }`,
     fixedCode: `function removeDuplicates(items) {
-  return [...new Set(items)]; // pure — does not mutate caller's array
+  return [...new Set(items)];
 }`,
   },
   {
@@ -114,25 +114,21 @@ if (!JWT_SECRET) throw new Error("JWT_SECRET environment variable is not set");`
     title: "SQL injection via string concatenation",
     severity: "Critical",
     description:
-      "Interpolating userId directly into the query string allows an attacker " +
-      "to inject arbitrary SQL. Always use parameterised queries.",
+      "Interpolating userId directly into the query allows arbitrary SQL injection. " +
+      "Always use parameterised queries.",
     originalCode: `function buildQuery(tableName, userId) {
   return \`SELECT * FROM \${tableName} WHERE id = \` + userId;
 }`,
     fixedCode: `function buildQuery(tableName, userId) {
-  // Use parameterised query — pass values separately, never inline them
   return { sql: "SELECT * FROM users WHERE id = ?", values: [userId] };
 }`,
   },
-
-  // ─── lib/fileHandler.js ───────────────────────────────────────────────────
   {
     filePath: "lib/fileHandler.js",
     title: "Path traversal in file read",
     severity: "Critical",
     description:
-      "path.join does not prevent '../' segments. A caller can supply " +
-      "'../../etc/passwd' to escape the intended base directory.",
+      "path.join does not prevent '../' segments — a caller can escape the intended base directory.",
     originalCode: `function readUserFile(baseDir, filename) {
   const filePath = path.join(baseDir, filename);
   return fs.readFileSync(filePath, "utf8");
@@ -150,8 +146,7 @@ if (!JWT_SECRET) throw new Error("JWT_SECRET environment variable is not set");`
     title: "Blocking fs.readFileSync inside async function",
     severity: "Medium",
     description:
-      "readFileSync inside an async function blocks the Node.js event loop, " +
-      "stalling all other requests. Use the promise-based fs/promises API.",
+      "readFileSync blocks the Node.js event loop. Use the promise-based fs/promises API.",
     originalCode: `async function countLines(filePath) {
   const content = fs.readFileSync(filePath, "utf8");
   return content.split("\\n").length;
@@ -165,6 +160,20 @@ async function countLines(filePath) {
   },
 ];
 
-export default function DiffViewerPage() {
-  return <FileDiffViewerPage files={DEMO_FILES} />;
+// ── Load live findings from the CLI-written JSON if available ─────────────────
+async function loadFindings(): Promise<DiffFile[]> {
+  const findingsPath = path.join(process.cwd(), ".blindspot-findings.json");
+  try {
+    const raw = await fsp.readFile(findingsPath, "utf8");
+    const parsed = JSON.parse(raw) as DiffFile[];
+    if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+  } catch {
+    // File doesn't exist or is invalid — fall through to demo data
+  }
+  return DEMO_FILES;
+}
+
+export default async function DiffViewerPage() {
+  const files = await loadFindings();
+  return <FileDiffViewerPage files={files} />;
 }

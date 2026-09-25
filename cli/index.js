@@ -288,7 +288,7 @@ async function run(cliOptions = {}) {
 
   // ── Diff Viewer: launch the side-by-side UI when --diff-viewer is set ─────
   if (cliOptions.diffViewer) {
-    await launchDiffViewer(gitRoot);
+    await launchDiffViewer(gitRoot, markdown);
     return; // Skip interactive CLI fix-mode; the UI handles it
   }
 
@@ -381,11 +381,33 @@ async function run(cliOptions = {}) {
 }
 
 // ── Diff Viewer launcher ──────────────────────────────────────────────────────
-// Starts `next dev` (or `next start` if a build exists) on a free port and
-// opens the /diff-viewer page in the user's default browser.
-async function launchDiffViewer(gitRoot) {
+// Writes scan findings to .blindspot-findings.json, starts the Next.js server,
+// then opens /diff-viewer in the user's default browser.
+const FINDINGS_FILENAME = ".blindspot-findings.json";
+
+async function launchDiffViewer(gitRoot, markdown) {
   const VIEWER_PORT = 3579;
   const viewerUrl = `http://localhost:${VIEWER_PORT}/diff-viewer`;
+
+  // ── 1. Parse findings from markdown and write to JSON ──────────────────────
+  const findings = parseFindingsForViewer(markdown);
+  const findingsPath = path.join(gitRoot, FINDINGS_FILENAME);
+  await fsp.writeFile(findingsPath, JSON.stringify(findings, null, 2), "utf8");
+  await ensureGitignoreEntry(gitRoot, FINDINGS_FILENAME);
+
+  if (findings.length === 0) {
+    console.log(`${YELLOW}No auto-fixable findings to display in the diff viewer.${RESET}`);
+    return;
+  }
+
+  console.log(`\n${YELLOW}Launching diff viewer — ${findings.length} issue(s) found${RESET}`);
+
+  // ── 2. Resolve the Next.js binary (use .cmd on Windows) ────────────────────
+  const isWin = process.platform === "win32";
+  const binDir = path.join(gitRoot, "node_modules", ".bin");
+  const nextBin = isWin
+    ? path.join(binDir, "next.cmd")
+    : path.join(binDir, "next");
 
   // Detect whether a production build is available
   const buildIdPath = path.join(gitRoot, ".next", "BUILD_ID");
@@ -397,18 +419,21 @@ async function launchDiffViewer(gitRoot) {
     hasProductionBuild = false;
   }
 
-  const nextCmd = hasProductionBuild ? "next start" : "next dev";
-  const nextBin = path.join(gitRoot, "node_modules", ".bin", "next");
+  const subCommand = hasProductionBuild ? "start" : "dev";
+  console.log(`Starting: next ${subCommand} --port ${VIEWER_PORT}`);
 
-  console.log(`\n${YELLOW}Launching diff viewer at ${viewerUrl}${RESET}`);
-  console.log(`Using: ${nextCmd} (port ${VIEWER_PORT})`);
-
-  // Spawn the Next.js server in the background
+  // ── 3. Spawn Next.js server ────────────────────────────────────────────────
   const { spawn } = require("child_process");
   const serverProc = spawn(
     nextBin,
-    [hasProductionBuild ? "start" : "dev", "--port", String(VIEWER_PORT)],
-    { cwd: gitRoot, stdio: "pipe", detached: false },
+    [subCommand, "--port", String(VIEWER_PORT)],
+    {
+      cwd: gitRoot,
+      stdio: "pipe",
+      // On Windows, shell:true is needed to invoke .cmd scripts via spawn
+      shell: isWin,
+      detached: false,
+    },
   );
 
   serverProc.stderr.on("data", () => {}); // suppress noise
@@ -416,21 +441,59 @@ async function launchDiffViewer(gitRoot) {
     console.error(`\x1b[31mFailed to start diff viewer server: ${err.message}${RESET}`);
   });
 
-  // Poll until the server responds, then open the browser
-  await waitForServer(viewerUrl, 30_000);
+  // ── 4. Wait for server, then open inside the IDE ──────────────────────────
+  await waitForServer(viewerUrl, 40_000);
+  openInIde(viewerUrl);
 
-  openBrowser(viewerUrl);
+  console.log(`\n${GREEN}✅ Diff viewer ready — ${findings.length} issue(s)${RESET}`);
+  console.log(`   URL: ${viewerUrl}`);
+  console.log(`   Press Ctrl+C to stop the viewer server.\n`);
 
-  console.log(`\n${GREEN}Diff viewer open at ${viewerUrl}${RESET}`);
-  console.log(`Press Ctrl+C to stop the viewer server.\n`);
-
-  // Keep the CLI alive so the server stays up
+  // Keep CLI alive so the server stays up
   await new Promise((resolve) => {
     process.on("SIGINT", () => {
       serverProc.kill();
       resolve(undefined);
     });
   });
+}
+
+// Parse ```original / ```suggestion fenced blocks out of the scan markdown.
+// Returns an array shaped as DiffFile (matches app/diff-viewer/FileDiffViewerPage.tsx).
+function parseFindingsForViewer(markdown) {
+  const results = [];
+  // Matches: ### Title \n ... - **File:** `path` ... optional ```original\n...\n``` ... ```suggestion\n...\n```
+  const re = /###\s+(.*?)\n([\s\S]*?)(?=###\s+|\s*$)/g;
+  for (const section of markdown.matchAll(re)) {
+    const title = section[1].trim();
+    const body  = section[2];
+
+    const fileMatch = body.match(/\*\*File:\*\*\s+`([^`]+)`/);
+    const sevMatch  = body.match(/\*\*Severity:\*\*\s+(\w+)/);
+    const descMatch = body.match(/\*\*Description:\*\*\s+([\s\S]*?)(?=\n\s*[-*]|\n```|$)/);
+    const origMatch = body.match(/```original\n([\s\S]*?)```/);
+    const suggMatch = body.match(/```suggestion\n([\s\S]*?)```/);
+
+    if (!fileMatch || !suggMatch) continue; // skip findings without a code fix
+
+    results.push({
+      filePath:     fileMatch[1],
+      title,
+      severity:     normaliseSeverity(sevMatch ? sevMatch[1] : "Medium"),
+      description:  descMatch ? descMatch[1].trim() : "",
+      originalCode: origMatch ? origMatch[1].trim() : "",
+      fixedCode:    suggMatch[1].trim(),
+    });
+  }
+  return results;
+}
+
+function normaliseSeverity(raw) {
+  const s = String(raw).trim();
+  if (/critical/i.test(s)) return "Critical";
+  if (/high/i.test(s))     return "High";
+  if (/low/i.test(s))      return "Low";
+  return "Medium";
 }
 
 async function waitForServer(url, timeoutMs) {
@@ -441,27 +504,43 @@ async function waitForServer(url, timeoutMs) {
         const client = url.startsWith("https:") ? https : http;
         const req = client.get(url, (res) => { res.resume(); resolve(); });
         req.on("error", reject);
-        req.setTimeout(500, () => { req.destroy(); reject(new Error("timeout")); });
+        req.setTimeout(600, () => { req.destroy(); reject(new Error("timeout")); });
       });
       return; // server is up
     } catch {
-      await new Promise((r) => setTimeout(r, 400));
+      await new Promise((r) => setTimeout(r, 500));
     }
   }
   console.warn(`${YELLOW}Timed out waiting for the diff viewer server.${RESET}`);
 }
 
-function openBrowser(url) {
-  const { platform } = process;
-  const cmd =
-    platform === "win32" ? `start "" "${url}"` :
-    platform === "darwin" ? `open "${url}"` :
-    `xdg-open "${url}"`;
-  try {
-    execSync(cmd, { stdio: "ignore" });
-  } catch {
-    console.log(`${YELLOW}Open your browser at: ${url}${RESET}`);
+// Open the diff viewer inside the IDE's built-in Simple Browser panel.
+// VS Code and Cursor both support the `simpleBrowser.show` command via a
+// `vscode://` URI, which the terminal hyperlink handler or the `code` CLI
+// can trigger — keeping everything inside the editor window.
+function openInIde(url) {
+  // The simpleBrowser.show URI format understood by VS Code / Cursor / Windsurf
+  const ideUri = `vscode://vscode.simpleBrowser/show?url=${encodeURIComponent(url)}`;
+
+  // Try the `code` CLI first (VS Code), then `cursor`, then `windsurf`.
+  // If none are found, fall back to printing the clickable URI so the user
+  // can Ctrl+click it in the integrated terminal.
+  const cliCandidates = ["code", "cursor", "windsurf"];
+  for (const cli of cliCandidates) {
+    try {
+      execSync(`${cli} --open-url "${ideUri}"`, { stdio: "ignore" });
+      return; // opened successfully
+    } catch {
+      // binary not on PATH — try next candidate
+    }
   }
+
+  // Fallback: print the vscode:// URI — VS Code's integrated terminal renders
+  // it as a clickable link that opens the Simple Browser panel inline.
+  console.log(`\n${YELLOW}Open the diff viewer inside your IDE:${RESET}`);
+  console.log(`  ${ideUri}`);
+  console.log(`\n  Or paste this URL into the Simple Browser panel:`);
+  console.log(`  ${url}`);
 }
 
 const program = new Command();
