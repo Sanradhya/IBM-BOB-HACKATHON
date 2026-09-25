@@ -43,18 +43,6 @@ The content is organized as follows:
 .github/
   workflows/
     blindspot-review.yml
-app/
-  api/
-    admin/
-      route.js
-  components/
-    FileDiffViewer.tsx
-  diff-viewer/
-    FileDiffViewerPage.tsx
-    page.tsx
-  globals.css
-  layout.tsx
-  page.tsx
 bob_sessions/
   .gitkeep
 cli/
@@ -74,7 +62,6 @@ test-app/
 .env.example
 .gitignore
 ARCHITECTURE.md
-next-env.d.ts
 package.json
 README.md
 tsconfig.json
@@ -82,683 +69,6 @@ tsconfig.json
 
 <files>
 This section contains the contents of the repository's files.
-
-<file path="next-env.d.ts">
-/// <reference types="next" />
-/// <reference types="next/image-types/global" />
-/// <reference path="./.next/types/routes.d.ts" />
-
-// NOTE: This file should not be edited
-// see https://nextjs.org/docs/app/api-reference/config/typescript for more information.
-</file>
-
-<file path="app/api/admin/route.js">
-// Missing authentication middleware!
-import { execSync } from "child_process";
-
-export async function GET(request) {
-  var legacyVar = "This is outdated";
-  var myBuffer = new Buffer("unsafe memory allocation");
-  
-  // Unhandled side effect
-  execSync("echo 'doing something dangerous'");
-
-  return new Response(myBuffer.toString(), { status: 200 });
-}
-</file>
-
-<file path="app/components/FileDiffViewer.tsx">
-"use client";
-
-import React, { useMemo } from "react";
-
-interface Line {
-  type: "added" | "removed" | "context";
-  content: string;
-  lineNo: number | null;
-}
-
-function computeLineDiff(original: string, fixed: string): { left: Line[]; right: Line[] } {
-  const origLines = original.split("\n");
-  const fixedLines = fixed.split("\n");
-
-  // Build a simple LCS-based diff
-  const m = origLines.length;
-  const n = fixedLines.length;
-
-  // dp[i][j] = LCS length for origLines[0..i-1], fixedLines[0..j-1]
-  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
-  for (let i = 1; i <= m; i++) {
-    for (let j = 1; j <= n; j++) {
-      if (origLines[i - 1] === fixedLines[j - 1]) {
-        dp[i][j] = dp[i - 1][j - 1] + 1;
-      } else {
-        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
-      }
-    }
-  }
-
-  // Backtrack to produce diff segments
-  const segments: Array<{ type: "equal" | "replace" | "delete" | "insert"; orig: string[]; fixed: string[] }> = [];
-  let i = m, j = n;
-  const ops: Array<{ type: "eq" | "del" | "ins"; oi: number; fi: number }> = [];
-
-  while (i > 0 || j > 0) {
-    if (i > 0 && j > 0 && origLines[i - 1] === fixedLines[j - 1]) {
-      ops.unshift({ type: "eq", oi: i - 1, fi: j - 1 });
-      i--; j--;
-    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
-      ops.unshift({ type: "ins", oi: -1, fi: j - 1 });
-      j--;
-    } else {
-      ops.unshift({ type: "del", oi: i - 1, fi: -1 });
-      i--;
-    }
-  }
-
-  const left: Line[] = [];
-  const right: Line[] = [];
-  let origNo = 1, fixedNo = 1;
-
-  for (const op of ops) {
-    if (op.type === "eq") {
-      left.push({ type: "context", content: origLines[op.oi], lineNo: origNo++ });
-      right.push({ type: "context", content: fixedLines[op.fi], lineNo: fixedNo++ });
-    } else if (op.type === "del") {
-      left.push({ type: "removed", content: origLines[op.oi], lineNo: origNo++ });
-      right.push({ type: "added", content: "", lineNo: null }); // blank spacer
-    } else {
-      left.push({ type: "removed", content: "", lineNo: null }); // blank spacer
-      right.push({ type: "added", content: fixedLines[op.fi], lineNo: fixedNo++ });
-    }
-  }
-
-  return { left, right };
-}
-
-interface FileDiffViewerProps {
-  originalCode: string;
-  fixedCode: string;
-  filePath: string;
-}
-
-export default function FileDiffViewer({
-  originalCode,
-  fixedCode,
-  filePath,
-}: FileDiffViewerProps) {
-  const { left, right } = useMemo(
-    () => computeLineDiff(originalCode, fixedCode),
-    [originalCode, fixedCode],
-  );
-
-  const renderLine = (line: Line, side: "left" | "right") => {
-    const isBlank = line.lineNo === null;
-    const bg =
-      line.type === "removed"
-        ? isBlank
-          ? "var(--diff-blank)"
-          : "var(--diff-del-bg)"
-        : line.type === "added"
-        ? isBlank
-          ? "var(--diff-blank)"
-          : "var(--diff-add-bg)"
-        : "transparent";
-
-    const linenoColour =
-      line.type === "removed" && !isBlank
-        ? "var(--diff-del-lineno)"
-        : line.type === "added" && !isBlank
-        ? "var(--diff-add-lineno)"
-        : "var(--diff-lineno)";
-
-    return (
-      <div className="diff-line" style={{ background: bg }}>
-        <span className="diff-lineno" style={{ color: linenoColour }}>
-          {line.lineNo ?? ""}
-        </span>
-        <span className="diff-gutter">
-          {line.type === "removed" && !isBlank
-            ? "−"
-            : line.type === "added" && !isBlank
-            ? "+"
-            : " "}
-        </span>
-        <pre className="diff-code">{line.content}</pre>
-      </div>
-    );
-  };
-
-  return (
-    <div className="diff-split-container">
-      {/* ── Left pane: original (bad code) ─────────────────── */}
-      <div className="diff-pane diff-pane-left">
-        <div className="diff-pane-header diff-pane-header-left">
-          <span className="diff-pane-label">◀ Original</span>
-          <span className="diff-pane-filename">{filePath}</span>
-        </div>
-        <div className="diff-pane-body">
-          {left.map((line, idx) => (
-            <React.Fragment key={idx}>{renderLine(line, "left")}</React.Fragment>
-          ))}
-        </div>
-      </div>
-
-      {/* ── Divider ──────────────────────────────────────────── */}
-      <div className="diff-divider" aria-hidden="true" />
-
-      {/* ── Right pane: fixed (correct code) ──────────────── */}
-      <div className="diff-pane diff-pane-right">
-        <div className="diff-pane-header diff-pane-header-right">
-          <span className="diff-pane-label">Fixed ▶</span>
-          <span className="diff-pane-filename">{filePath}</span>
-        </div>
-        <div className="diff-pane-body">
-          {right.map((line, idx) => (
-            <React.Fragment key={idx}>{renderLine(line, "right")}</React.Fragment>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-</file>
-
-<file path="app/diff-viewer/FileDiffViewerPage.tsx">
-"use client";
-
-import { useState } from "react";
-import FileDiffViewer from "../components/FileDiffViewer";
-
-export interface DiffFile {
-  filePath: string;
-  title: string;
-  severity: "Critical" | "High" | "Medium" | "Low";
-  originalCode: string;
-  fixedCode: string;
-  description: string;
-}
-
-interface FileDiffViewerPageProps {
-  files: DiffFile[];
-  initialIndex?: number;
-}
-
-export default function FileDiffViewerPage({
-  files,
-  initialIndex = 0,
-}: FileDiffViewerPageProps) {
-  const [activeIndex, setActiveIndex] = useState(initialIndex);
-
-  if (!files || files.length === 0) {
-    return (
-      <div className="no-issues">
-        <p>No issues found to display.</p>
-      </div>
-    );
-  }
-
-  const current = files[activeIndex];
-
-  const severityColour: Record<DiffFile["severity"], string> = {
-    Critical: "#dc2626",
-    High: "#ea580c",
-    Medium: "#d97706",
-    Low: "#65a30d",
-  };
-
-  return (
-    <div className="diff-page">
-      {/* ── Sidebar: file list ─────────────────────────────── */}
-      <aside className="diff-sidebar">
-        <div className="sidebar-header">
-          <span className="sidebar-title">Issues Found</span>
-          <span className="sidebar-count">{files.length}</span>
-        </div>
-        <ul className="sidebar-list">
-          {files.map((f, i) => (
-            <li
-              key={i}
-              className={`sidebar-item ${i === activeIndex ? "active" : ""}`}
-              onClick={() => setActiveIndex(i)}
-            >
-              <span
-                className="severity-dot"
-                style={{ background: severityColour[f.severity] }}
-              />
-              <div className="sidebar-item-text">
-                <span className="sidebar-item-title">{f.title}</span>
-                <span className="sidebar-item-path">{f.filePath}</span>
-              </div>
-            </li>
-          ))}
-        </ul>
-      </aside>
-
-      {/* ── Main panel: side-by-side diff ──────────────────── */}
-      <main className="diff-main">
-        <div className="diff-header">
-          <div className="diff-header-left">
-            <span
-              className="diff-severity-badge"
-              style={{ background: severityColour[current.severity] }}
-            >
-              {current.severity}
-            </span>
-            <h2 className="diff-issue-title">{current.title}</h2>
-          </div>
-          <span className="diff-filepath">{current.filePath}</span>
-        </div>
-
-        {current.description && (
-          <p className="diff-description">{current.description}</p>
-        )}
-
-        <FileDiffViewer
-          originalCode={current.originalCode}
-          fixedCode={current.fixedCode}
-          filePath={current.filePath}
-        />
-
-        {/* ── Navigation ─────────────────────────────────── */}
-        <div className="diff-nav">
-          <button
-            className="diff-nav-btn"
-            disabled={activeIndex === 0}
-            onClick={() => setActiveIndex((i) => i - 1)}
-          >
-            ← Previous
-          </button>
-          <span className="diff-nav-counter">
-            {activeIndex + 1} / {files.length}
-          </span>
-          <button
-            className="diff-nav-btn"
-            disabled={activeIndex === files.length - 1}
-            onClick={() => setActiveIndex((i) => i + 1)}
-          >
-            Next →
-          </button>
-        </div>
-      </main>
-    </div>
-  );
-}
-</file>
-
-<file path="app/globals.css">
-/* ═══════════════════════════════════════════════════════════════
-   Blindspot — global styles
-   ═══════════════════════════════════════════════════════════════ */
-
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-:root {
-  --font: -apple-system, "Segoe UI", system-ui, sans-serif;
-  --bg: #0d1117;
-  --surface: #161b22;
-  --border: #30363d;
-  --text: #e6edf3;
-  --muted: #8b949e;
-  --accent: #3b82d4;
-
-  /* diff colours */
-  --diff-del-bg:     #3d1212;
-  --diff-del-lineno: #f87171;
-  --diff-add-bg:     #0d3a1e;
-  --diff-add-lineno: #4ade80;
-  --diff-blank:      #161b22;
-  --diff-lineno:     #484f58;
-  --diff-gutter-del: #f87171;
-  --diff-gutter-add: #4ade80;
-}
-
-html, body { height: 100%; }
-
-body {
-  font-family: var(--font);
-  background: var(--bg);
-  color: var(--text);
-  font-size: 14px;
-  line-height: 1.6;
-}
-
-/* ── Landing / main page ──────────────────────────────────────── */
-.home-container {
-  max-width: 760px;
-  margin: 0 auto;
-  padding: 64px 24px;
-}
-
-.home-logo {
-  font-size: 28px;
-  font-weight: 700;
-  letter-spacing: -0.5px;
-  color: var(--text);
-  margin-bottom: 8px;
-}
-
-.home-tagline {
-  color: var(--muted);
-  margin-bottom: 40px;
-}
-
-.home-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 28px;
-  margin-bottom: 20px;
-}
-
-.home-card h2 { font-size: 16px; margin-bottom: 8px; }
-.home-card p  { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
-
-.btn {
-  display: inline-block;
-  background: var(--accent);
-  color: #fff;
-  padding: 8px 18px;
-  border-radius: 6px;
-  text-decoration: none;
-  font-size: 13px;
-  font-weight: 500;
-  border: none;
-  cursor: pointer;
-  transition: opacity 0.15s;
-}
-.btn:hover { opacity: 0.85; }
-
-/* ── Diff viewer layout ───────────────────────────────────────── */
-.diff-page {
-  display: flex;
-  height: 100vh;
-  overflow: hidden;
-}
-
-/* Sidebar */
-.diff-sidebar {
-  width: 280px;
-  min-width: 240px;
-  background: var(--surface);
-  border-right: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.sidebar-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 16px;
-  border-bottom: 1px solid var(--border);
-}
-
-.sidebar-title { font-weight: 600; font-size: 13px; color: var(--text); }
-
-.sidebar-count {
-  background: #30363d;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 20px;
-}
-
-.sidebar-list {
-  list-style: none;
-  overflow-y: auto;
-  flex: 1;
-}
-
-.sidebar-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 12px 16px;
-  cursor: pointer;
-  border-bottom: 1px solid var(--border);
-  transition: background 0.1s;
-}
-.sidebar-item:hover    { background: rgba(255,255,255,0.04); }
-.sidebar-item.active   { background: rgba(59,130,212,0.12); border-left: 3px solid var(--accent); }
-
-.severity-dot {
-  width: 8px; height: 8px;
-  border-radius: 50%;
-  margin-top: 6px;
-  flex-shrink: 0;
-}
-
-.sidebar-item-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.sidebar-item-title { font-size: 12px; font-weight: 500; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.sidebar-item-path  { font-size: 11px; color: var(--muted); font-family: monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
-/* Main diff area */
-.diff-main {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  background: var(--bg);
-}
-
-.diff-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 14px 20px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface);
-  gap: 16px;
-  flex-wrap: wrap;
-}
-
-.diff-header-left   { display: flex; align-items: center; gap: 10px; }
-.diff-severity-badge {
-  font-size: 11px;
-  font-weight: 700;
-  padding: 3px 10px;
-  border-radius: 20px;
-  color: #fff;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  flex-shrink: 0;
-}
-
-.diff-issue-title   { font-size: 14px; font-weight: 600; color: var(--text); }
-.diff-filepath      { font-size: 12px; font-family: monospace; color: var(--muted); }
-
-.diff-description {
-  padding: 10px 20px;
-  font-size: 13px;
-  color: var(--muted);
-  border-bottom: 1px solid var(--border);
-  background: var(--surface);
-}
-
-/* Split-screen diff container */
-.diff-split-container {
-  display: flex;
-  flex: 1;
-  overflow: hidden;
-}
-
-.diff-pane {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  min-width: 0;
-}
-
-.diff-pane-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 12px;
-  font-size: 12px;
-  font-weight: 600;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-
-.diff-pane-header-left  { background: #2d1212; color: #f87171; }
-.diff-pane-header-right { background: #0d2a18; color: #4ade80; }
-
-.diff-pane-label    { font-size: 12px; }
-.diff-pane-filename { font-family: monospace; font-size: 11px; opacity: 0.7; }
-
-.diff-pane-body {
-  flex: 1;
-  overflow-y: auto;
-  overflow-x: auto;
-}
-
-.diff-divider {
-  width: 1px;
-  background: var(--border);
-  flex-shrink: 0;
-}
-
-/* Individual diff lines */
-.diff-line {
-  display: flex;
-  align-items: flex-start;
-  min-height: 22px;
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-  font-size: 12px;
-  line-height: 22px;
-}
-
-.diff-lineno {
-  width: 44px;
-  min-width: 44px;
-  text-align: right;
-  padding-right: 12px;
-  padding-left: 6px;
-  user-select: none;
-  flex-shrink: 0;
-  font-size: 11px;
-}
-
-.diff-gutter {
-  width: 16px;
-  min-width: 16px;
-  text-align: center;
-  font-weight: 700;
-  flex-shrink: 0;
-  user-select: none;
-}
-
-.diff-code {
-  flex: 1;
-  padding: 0 8px;
-  white-space: pre;
-  tab-size: 2;
-  font-family: inherit;
-  font-size: inherit;
-  line-height: inherit;
-  background: transparent;
-  margin: 0;
-}
-
-/* Navigation */
-.diff-nav {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 16px;
-  padding: 12px 20px;
-  border-top: 1px solid var(--border);
-  background: var(--surface);
-  flex-shrink: 0;
-}
-
-.diff-nav-btn {
-  background: #21262d;
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px 14px;
-  font-size: 13px;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-.diff-nav-btn:hover:not(:disabled) { background: #30363d; }
-.diff-nav-btn:disabled { opacity: 0.4; cursor: default; }
-
-.diff-nav-counter { font-size: 13px; color: var(--muted); }
-
-.no-issues {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 100vh;
-  color: var(--muted);
-}
-</file>
-
-<file path="app/layout.tsx">
-import type { Metadata } from "next";
-import "./globals.css";
-
-export const metadata: Metadata = {
-  title: "Blindspot",
-  description: "Local AI code reviewer",
-};
-
-export default function RootLayout({ children }: { children: React.ReactNode }) {
-  return (
-    <html lang="en">
-      <body>{children}</body>
-    </html>
-  );
-}
-</file>
-
-<file path="app/page.tsx">
-import Link from "next/link";
-
-export default function HomePage() {
-  return (
-    <div className="home-container">
-      <h1 className="home-logo">🔍 Blindspot</h1>
-      <p className="home-tagline">Local AI code reviewer — catches what git diff misses.</p>
-
-      <div className="home-card">
-        <h2>Side-by-Side Diff Viewer</h2>
-        <p>
-          Blindspot detected <strong>9 issues</strong> across{" "}
-          <code>lib/auth.js</code>, <code>lib/dataProcessor.js</code>, and{" "}
-          <code>lib/fileHandler.js</code> on this branch. Open the viewer to
-          inspect each finding — the left pane shows the original (buggy) code
-          highlighted in red; the right pane shows the corrected version in green.
-        </p>
-        <Link href="/diff-viewer" className="btn">
-          Open Diff Viewer →
-        </Link>
-      </div>
-
-      <div className="home-card">
-        <h2>Issues on this branch</h2>
-        <p>
-          This branch (<code>demo-wrong-code</code>) contains intentional code
-          bugs across three files — logic errors, security vulnerabilities, and
-          bad practices — designed to demonstrate Blindspot&apos;s detection and
-          side-by-side fix presentation.
-        </p>
-        <ul style={{ marginTop: 12, paddingLeft: 20, color: "var(--muted)", fontSize: 13 }}>
-          <li><code>lib/auth.js</code> — MD5 password hashing, timing attack, hardcoded secret, eval()</li>
-          <li><code>lib/dataProcessor.js</code> — off-by-one loop, array mutation, SQL injection</li>
-          <li><code>lib/fileHandler.js</code> — path traversal, sync I/O in async, missing encoding</li>
-        </ul>
-      </div>
-    </div>
-  );
-}
-</file>
 
 <file path="bob_sessions/.gitkeep">
 
@@ -3014,21 +2324,6 @@ function deleteDir(dirPath) {
 module.exports = { readUserFile, countLines, safeWrite, loadConfig, deleteDir };
 </file>
 
-<file path="lib/utils.js">
-const url = require("url");
-const fs = require("fs");
-
-function parseMyUrl(reqUrl) {
-  const myBuffer = Buffer.from(reqUrl);
-  const parsed = new URL(reqUrl);
-  
-  if (fs.access(parsed.pathname)) {
-    return true;
-  }
-  return false;
-}
-</file>
-
 <file path="test-app/package.json">
 {
   "name": "test-app",
@@ -3117,261 +2412,40 @@ Legacy ES5 declarations must be modernized to ES2024+ standards.
 - New code introduced in a change must already meet this standard. A diff that adds any of the legacy forms above is a violation.
 </file>
 
+<file path="lib/utils.js">
+const url = require("url");
+const fs = require("fs");
+
+function parseMyUrl(reqUrl) {
+  const myBuffer = Buffer.from(reqUrl);
+  const parsed = new URL(reqUrl);
+  
+  if (fs.access(parsed.pathname)) {
+    return true;
+  }
+  return false;
+}
+</file>
+
 <file path="tsconfig.json">
 {
   "compilerOptions": {
     "target": "ES2017",
-    "lib": ["dom", "dom.iterable", "esnext"],
+    "lib": ["esnext"],
     "allowJs": true,
     "skipLibCheck": true,
     "strict": true,
     "noEmit": true,
     "esModuleInterop": true,
     "module": "esnext",
-    "moduleResolution": "bundler",
+    "moduleResolution": "node",
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "jsx": "preserve",
-    "incremental": true,
-    "plugins": [
-      {
-        "name": "next"
-      }
-    ],
-    "paths": {
-      "@/*": ["./*"]
-    }
+    "incremental": true
   },
-  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
-  "exclude": ["node_modules"]
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules", ".next"]
 }
-</file>
-
-<file path="app/diff-viewer/page.tsx">
-import { promises as fsp } from "fs";
-import path from "path";
-import FileDiffViewerPage, { type DiffFile } from "./FileDiffViewerPage";
-
-// Force dynamic rendering so the server always reads the latest findings file
-export const dynamic = "force-dynamic";
-
-// ── Demo fallback data (shown when no live scan findings are present) ─────────
-const DEMO_FILES: DiffFile[] = [
-  {
-    filePath: "lib/auth.js",
-    title: "Broken-hash password storage (MD5)",
-    severity: "Critical",
-    description:
-      "MD5 is a broken hash function, trivially reversible via rainbow tables. " +
-      "Passwords must be hashed with a slow, salted KDF such as bcrypt or scrypt.",
-    originalCode: `function hashPassword(password) {
-  return crypto.createHash("md5").update(password).digest("hex");
-}`,
-    fixedCode: `const bcrypt = require("bcrypt");
-
-async function hashPassword(password) {
-  const saltRounds = 12;
-  return bcrypt.hash(password, saltRounds);
-}`,
-  },
-  {
-    filePath: "lib/auth.js",
-    title: "Timing-attack-vulnerable token comparison",
-    severity: "High",
-    description:
-      "String equality (===) exits early on the first mismatched character, " +
-      "leaking timing information. Use crypto.timingSafeEqual instead.",
-    originalCode: `function verifyToken(inputToken, storedToken) {
-  return inputToken === storedToken;
-}`,
-    fixedCode: `function verifyToken(inputToken, storedToken) {
-  const a = Buffer.from(inputToken);
-  const b = Buffer.from(storedToken);
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(a, b);
-}`,
-  },
-  {
-    filePath: "lib/auth.js",
-    title: "Hardcoded JWT secret in source code",
-    severity: "Critical",
-    description:
-      "Secrets committed to source code are exposed to anyone with repo access. " +
-      "Load secrets exclusively from environment variables at runtime.",
-    originalCode: `const JWT_SECRET = "super_secret_key_12345";`,
-    fixedCode: `const JWT_SECRET = process.env.JWT_SECRET;
-if (!JWT_SECRET) throw new Error("JWT_SECRET environment variable is not set");`,
-  },
-  {
-    filePath: "lib/auth.js",
-    title: "eval() on unsanitised user input (RCE)",
-    severity: "Critical",
-    description:
-      "eval() executes arbitrary JavaScript. Passing user-controlled input to it " +
-      "enables Remote Code Execution. Use JSON.parse or a safe schema validator.",
-    originalCode: `function parseConfig(configStr) {
-  return eval(configStr);
-}`,
-    fixedCode: `function parseConfig(configStr) {
-  return JSON.parse(configStr);
-}`,
-  },
-  {
-    filePath: "lib/dataProcessor.js",
-    title: "Off-by-one error in array loop",
-    severity: "High",
-    description:
-      "Loop condition is i <= arr.length, which reads arr[arr.length] — " +
-      "an out-of-bounds undefined, silently turning the sum into NaN.",
-    originalCode: `function sumArray(arr) {
-  let total = 0;
-  for (let i = 0; i <= arr.length; i++) {
-    total += arr[i];
-  }
-  return total;
-}`,
-    fixedCode: `function sumArray(arr) {
-  let total = 0;
-  for (let i = 0; i < arr.length; i++) {
-    total += arr[i];
-  }
-  return total;
-}`,
-  },
-  {
-    filePath: "lib/dataProcessor.js",
-    title: "Array mutation instead of copy in removeDuplicates",
-    severity: "Medium",
-    description:
-      "splice() mutates the original array passed by the caller. Work on a copy instead.",
-    originalCode: `function removeDuplicates(items) {
-  for (let i = 0; i < items.length; i++) {
-    for (let j = i + 1; j < items.length; j++) {
-      if (items[i] === items[j]) {
-        items.splice(j, 1);
-        j--;
-      }
-    }
-  }
-  return items;
-}`,
-    fixedCode: `function removeDuplicates(items) {
-  return [...new Set(items)];
-}`,
-  },
-  {
-    filePath: "lib/dataProcessor.js",
-    title: "SQL injection via string concatenation",
-    severity: "Critical",
-    description:
-      "Interpolating userId directly into the query allows arbitrary SQL injection. " +
-      "Always use parameterised queries.",
-    originalCode: `function buildQuery(tableName, userId) {
-  return \`SELECT * FROM \${tableName} WHERE id = \` + userId;
-}`,
-    fixedCode: `function buildQuery(tableName, userId) {
-  return { sql: "SELECT * FROM users WHERE id = ?", values: [userId] };
-}`,
-  },
-  {
-    filePath: "lib/fileHandler.js",
-    title: "Path traversal in file read",
-    severity: "Critical",
-    description:
-      "path.join does not prevent '../' segments — a caller can escape the intended base directory.",
-    originalCode: `function readUserFile(baseDir, filename) {
-  const filePath = path.join(baseDir, filename);
-  return fs.readFileSync(filePath, "utf8");
-}`,
-    fixedCode: `function readUserFile(baseDir, filename) {
-  const resolved = path.resolve(baseDir, filename);
-  if (!resolved.startsWith(path.resolve(baseDir) + path.sep)) {
-    throw new Error("Path traversal detected");
-  }
-  return fs.readFileSync(resolved, "utf8");
-}`,
-  },
-  {
-    filePath: "lib/fileHandler.js",
-    title: "Blocking fs.readFileSync inside async function",
-    severity: "Medium",
-    description:
-      "readFileSync blocks the Node.js event loop. Use the promise-based fs/promises API.",
-    originalCode: `async function countLines(filePath) {
-  const content = fs.readFileSync(filePath, "utf8");
-  return content.split("\\n").length;
-}`,
-    fixedCode: `const fsp = require("fs/promises");
-
-async function countLines(filePath) {
-  const content = await fsp.readFile(filePath, "utf8");
-  return content.split("\\n").length;
-}`,
-  },
-];
-
-// ── Load live findings from the CLI-written JSON if available ─────────────────
-async function loadFindings(): Promise<DiffFile[]> {
-  const findingsPath = path.join(process.cwd(), ".blindspot-findings.json");
-  try {
-    const raw = await fsp.readFile(findingsPath, "utf8");
-    const parsed = JSON.parse(raw) as DiffFile[];
-    if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-  } catch {
-    // File doesn't exist or is invalid — fall through to demo data
-  }
-  return DEMO_FILES;
-}
-
-export default async function DiffViewerPage() {
-  const files = await loadFindings();
-  return <FileDiffViewerPage files={files} />;
-}
-</file>
-
-<file path=".gitignore">
-# dependencies
-/node_modules
-/.pnp
-.pnp.*
-.yarn/*
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/versions
-
-# testing
-/coverage
-
-# next.js
-/.next/
-/out/
-
-# production
-/build
-
-# misc
-.DS_Store
-*.pem
-
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-
-# env files
-.env
-.env*.local
-
-# vercel
-.vercel
-
-# typescript
-*.tsbuildinfo
-blindspot-report.md
-bob-session-logs.json
-blindspot-diff-viewer.html
 </file>
 
 <file path=".github/workflows/blindspot-review.yml">
@@ -3421,40 +2495,49 @@ jobs:
           header: blindspot-architectural-review
 </file>
 
-<file path="package.json">
-{
-  "name": "blindspot",
-  "version": "0.1.0",
-  "private": true,
-  "bin": {
-    "blindspot": "./cli/index.js"
-  },
-  "scripts": {
-    "start": "node cli/index.js",
-    "review": "node cli/index.js --provider bob --export-logs",
-    "review:llama": "node cli/index.js --provider llama --export-logs",
-    "eval": "node evals/run.mjs",
-    "dev": "next dev",
-    "build": "next build",
-    "serve": "next start"
-  },
-  "dependencies": {
-    "cli-progress": "^3.12.0",
-    "commander": "^15.0.0",
-    "dotenv": "^18.0.3",
-    "next": "^15.5.26",
-    "node-llama-cpp": "^3.19.0",
-    "pdf-parse": "^1.1.1",
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0",
-    "simple-git": "^3.36.0"
-  },
-  "devDependencies": {
-    "@types/node": "20.17.6",
-    "@types/react": "19.3.0",
-    "typescript": "5.8.2"
-  }
-}
+<file path=".gitignore">
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files
+.env
+.env*.local
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+blindspot-report.md
+bob-session-logs.json
+blindspot-diff-viewer.html
 </file>
 
 <file path="cli/index.js">
@@ -3860,6 +2943,35 @@ program
   });
 
 program.parse();
+</file>
+
+<file path="package.json">
+{
+  "name": "blindspot",
+  "version": "0.1.0",
+  "private": true,
+  "bin": {
+    "blindspot": "./cli/index.js"
+  },
+  "scripts": {
+    "start": "node cli/index.js",
+    "review": "node cli/index.js --provider bob --export-logs",
+    "review:llama": "node cli/index.js --provider llama --export-logs",
+    "eval": "node evals/run.mjs"
+  },
+  "dependencies": {
+    "cli-progress": "^3.12.0",
+    "commander": "^15.0.0",
+    "dotenv": "^18.0.3",
+    "node-llama-cpp": "^3.19.0",
+    "pdf-parse": "^1.1.1",
+    "simple-git": "^3.36.0"
+  },
+  "devDependencies": {
+    "@types/node": "20.17.6",
+    "typescript": "5.8.2"
+  }
+}
 </file>
 
 </files>
