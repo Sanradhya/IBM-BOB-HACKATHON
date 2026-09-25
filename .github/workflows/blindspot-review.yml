@@ -31,6 +31,8 @@ jobs:
           BOB_API_KEY: ${{ secrets.BOB_API_KEY }}
           BOB_LIVE_API: 'true'
         run: |
+          git fetch origin ${{ github.event.pull_request.base.ref }}
+          git reset origin/${{ github.event.pull_request.base.ref }}
           node cli/index.js --provider bob --export-logs
 
       - name: Post PR Review Comment
