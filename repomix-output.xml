@@ -43,6 +43,18 @@ The content is organized as follows:
 .github/
   workflows/
     blindspot-review.yml
+app/
+  api/
+    admin/
+      route.js
+  components/
+    FileDiffViewer.tsx
+  diff-viewer/
+    FileDiffViewerPage.tsx
+    page.tsx
+  globals.css
+  layout.tsx
+  page.tsx
 bob_sessions/
   .gitkeep
 cli/
@@ -50,11 +62,19 @@ cli/
   index.js
 evals/
   run.mjs
+lib/
+  auth.js
+  dataProcessor.js
+  fileHandler.js
+  utils.js
+test-app/
+  package.json
 .blindspot-data.json
 .cursorrules
 .env.example
 .gitignore
 ARCHITECTURE.md
+next-env.d.ts
 package.json
 README.md
 tsconfig.json
@@ -63,48 +83,681 @@ tsconfig.json
 <files>
 This section contains the contents of the repository's files.
 
-<file path=".github/workflows/blindspot-review.yml">
-name: Blindspot AI Code Reviewer
+<file path="next-env.d.ts">
+/// <reference types="next" />
+/// <reference types="next/image-types/global" />
+/// <reference path="./.next/types/routes.d.ts" />
 
-on:
-  pull_request:
-    types: [opened, synchronize, reopened]
+// NOTE: This file should not be edited
+// see https://nextjs.org/docs/app/api-reference/config/typescript for more information.
+</file>
 
-jobs:
-  review:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
+<file path="app/api/admin/route.js">
+// Missing authentication middleware!
+import { execSync } from "child_process";
 
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+export async function GET(request) {
+  var legacyVar = "This is outdated";
+  var myBuffer = new Buffer("unsafe memory allocation");
+  
+  // Unhandled side effect
+  execSync("echo 'doing something dangerous'");
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+  return new Response(myBuffer.toString(), { status: 200 });
+}
+</file>
 
-      - name: Install Dependencies
-        run: npm ci
+<file path="app/components/FileDiffViewer.tsx">
+"use client";
 
-      - name: Run Blindspot PR Review
-        env:
-          ENGINE_PROVIDER: 'bob'
-          BOB_API_KEY: ${{ secrets.BOB_API_KEY }}
-          BOB_LIVE_API: 'true'
-        run: |
-          node cli/index.js --provider bob --export-logs
+import React, { useMemo } from "react";
 
-      - name: Post PR Review Comment
-        uses: marocchino/sticky-pull-request-comment@v2
-        if: always()
-        with:
-          path: blindspot-report.md
-          header: blindspot-architectural-review
+interface Line {
+  type: "added" | "removed" | "context";
+  content: string;
+  lineNo: number | null;
+}
+
+function computeLineDiff(original: string, fixed: string): { left: Line[]; right: Line[] } {
+  const origLines = original.split("\n");
+  const fixedLines = fixed.split("\n");
+
+  // Build a simple LCS-based diff
+  const m = origLines.length;
+  const n = fixedLines.length;
+
+  // dp[i][j] = LCS length for origLines[0..i-1], fixedLines[0..j-1]
+  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (origLines[i - 1] === fixedLines[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1] + 1;
+      } else {
+        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+      }
+    }
+  }
+
+  // Backtrack to produce diff segments
+  const segments: Array<{ type: "equal" | "replace" | "delete" | "insert"; orig: string[]; fixed: string[] }> = [];
+  let i = m, j = n;
+  const ops: Array<{ type: "eq" | "del" | "ins"; oi: number; fi: number }> = [];
+
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && origLines[i - 1] === fixedLines[j - 1]) {
+      ops.unshift({ type: "eq", oi: i - 1, fi: j - 1 });
+      i--; j--;
+    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+      ops.unshift({ type: "ins", oi: -1, fi: j - 1 });
+      j--;
+    } else {
+      ops.unshift({ type: "del", oi: i - 1, fi: -1 });
+      i--;
+    }
+  }
+
+  const left: Line[] = [];
+  const right: Line[] = [];
+  let origNo = 1, fixedNo = 1;
+
+  for (const op of ops) {
+    if (op.type === "eq") {
+      left.push({ type: "context", content: origLines[op.oi], lineNo: origNo++ });
+      right.push({ type: "context", content: fixedLines[op.fi], lineNo: fixedNo++ });
+    } else if (op.type === "del") {
+      left.push({ type: "removed", content: origLines[op.oi], lineNo: origNo++ });
+      right.push({ type: "added", content: "", lineNo: null }); // blank spacer
+    } else {
+      left.push({ type: "removed", content: "", lineNo: null }); // blank spacer
+      right.push({ type: "added", content: fixedLines[op.fi], lineNo: fixedNo++ });
+    }
+  }
+
+  return { left, right };
+}
+
+interface FileDiffViewerProps {
+  originalCode: string;
+  fixedCode: string;
+  filePath: string;
+}
+
+export default function FileDiffViewer({
+  originalCode,
+  fixedCode,
+  filePath,
+}: FileDiffViewerProps) {
+  const { left, right } = useMemo(
+    () => computeLineDiff(originalCode, fixedCode),
+    [originalCode, fixedCode],
+  );
+
+  const renderLine = (line: Line, side: "left" | "right") => {
+    const isBlank = line.lineNo === null;
+    const bg =
+      line.type === "removed"
+        ? isBlank
+          ? "var(--diff-blank)"
+          : "var(--diff-del-bg)"
+        : line.type === "added"
+        ? isBlank
+          ? "var(--diff-blank)"
+          : "var(--diff-add-bg)"
+        : "transparent";
+
+    const linenoColour =
+      line.type === "removed" && !isBlank
+        ? "var(--diff-del-lineno)"
+        : line.type === "added" && !isBlank
+        ? "var(--diff-add-lineno)"
+        : "var(--diff-lineno)";
+
+    return (
+      <div className="diff-line" style={{ background: bg }}>
+        <span className="diff-lineno" style={{ color: linenoColour }}>
+          {line.lineNo ?? ""}
+        </span>
+        <span className="diff-gutter">
+          {line.type === "removed" && !isBlank
+            ? "−"
+            : line.type === "added" && !isBlank
+            ? "+"
+            : " "}
+        </span>
+        <pre className="diff-code">{line.content}</pre>
+      </div>
+    );
+  };
+
+  return (
+    <div className="diff-split-container">
+      {/* ── Left pane: original (bad code) ─────────────────── */}
+      <div className="diff-pane diff-pane-left">
+        <div className="diff-pane-header diff-pane-header-left">
+          <span className="diff-pane-label">◀ Original</span>
+          <span className="diff-pane-filename">{filePath}</span>
+        </div>
+        <div className="diff-pane-body">
+          {left.map((line, idx) => (
+            <React.Fragment key={idx}>{renderLine(line, "left")}</React.Fragment>
+          ))}
+        </div>
+      </div>
+
+      {/* ── Divider ──────────────────────────────────────────── */}
+      <div className="diff-divider" aria-hidden="true" />
+
+      {/* ── Right pane: fixed (correct code) ──────────────── */}
+      <div className="diff-pane diff-pane-right">
+        <div className="diff-pane-header diff-pane-header-right">
+          <span className="diff-pane-label">Fixed ▶</span>
+          <span className="diff-pane-filename">{filePath}</span>
+        </div>
+        <div className="diff-pane-body">
+          {right.map((line, idx) => (
+            <React.Fragment key={idx}>{renderLine(line, "right")}</React.Fragment>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="app/diff-viewer/FileDiffViewerPage.tsx">
+"use client";
+
+import { useState } from "react";
+import FileDiffViewer from "../components/FileDiffViewer";
+
+export interface DiffFile {
+  filePath: string;
+  title: string;
+  severity: "Critical" | "High" | "Medium" | "Low";
+  originalCode: string;
+  fixedCode: string;
+  description: string;
+}
+
+interface FileDiffViewerPageProps {
+  files: DiffFile[];
+  initialIndex?: number;
+}
+
+export default function FileDiffViewerPage({
+  files,
+  initialIndex = 0,
+}: FileDiffViewerPageProps) {
+  const [activeIndex, setActiveIndex] = useState(initialIndex);
+
+  if (!files || files.length === 0) {
+    return (
+      <div className="no-issues">
+        <p>No issues found to display.</p>
+      </div>
+    );
+  }
+
+  const current = files[activeIndex];
+
+  const severityColour: Record<DiffFile["severity"], string> = {
+    Critical: "#dc2626",
+    High: "#ea580c",
+    Medium: "#d97706",
+    Low: "#65a30d",
+  };
+
+  return (
+    <div className="diff-page">
+      {/* ── Sidebar: file list ─────────────────────────────── */}
+      <aside className="diff-sidebar">
+        <div className="sidebar-header">
+          <span className="sidebar-title">Issues Found</span>
+          <span className="sidebar-count">{files.length}</span>
+        </div>
+        <ul className="sidebar-list">
+          {files.map((f, i) => (
+            <li
+              key={i}
+              className={`sidebar-item ${i === activeIndex ? "active" : ""}`}
+              onClick={() => setActiveIndex(i)}
+            >
+              <span
+                className="severity-dot"
+                style={{ background: severityColour[f.severity] }}
+              />
+              <div className="sidebar-item-text">
+                <span className="sidebar-item-title">{f.title}</span>
+                <span className="sidebar-item-path">{f.filePath}</span>
+              </div>
+            </li>
+          ))}
+        </ul>
+      </aside>
+
+      {/* ── Main panel: side-by-side diff ──────────────────── */}
+      <main className="diff-main">
+        <div className="diff-header">
+          <div className="diff-header-left">
+            <span
+              className="diff-severity-badge"
+              style={{ background: severityColour[current.severity] }}
+            >
+              {current.severity}
+            </span>
+            <h2 className="diff-issue-title">{current.title}</h2>
+          </div>
+          <span className="diff-filepath">{current.filePath}</span>
+        </div>
+
+        {current.description && (
+          <p className="diff-description">{current.description}</p>
+        )}
+
+        <FileDiffViewer
+          originalCode={current.originalCode}
+          fixedCode={current.fixedCode}
+          filePath={current.filePath}
+        />
+
+        {/* ── Navigation ─────────────────────────────────── */}
+        <div className="diff-nav">
+          <button
+            className="diff-nav-btn"
+            disabled={activeIndex === 0}
+            onClick={() => setActiveIndex((i) => i - 1)}
+          >
+            ← Previous
+          </button>
+          <span className="diff-nav-counter">
+            {activeIndex + 1} / {files.length}
+          </span>
+          <button
+            className="diff-nav-btn"
+            disabled={activeIndex === files.length - 1}
+            onClick={() => setActiveIndex((i) => i + 1)}
+          >
+            Next →
+          </button>
+        </div>
+      </main>
+    </div>
+  );
+}
+</file>
+
+<file path="app/globals.css">
+/* ═══════════════════════════════════════════════════════════════
+   Blindspot — global styles
+   ═══════════════════════════════════════════════════════════════ */
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --font: -apple-system, "Segoe UI", system-ui, sans-serif;
+  --bg: #0d1117;
+  --surface: #161b22;
+  --border: #30363d;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --accent: #3b82d4;
+
+  /* diff colours */
+  --diff-del-bg:     #3d1212;
+  --diff-del-lineno: #f87171;
+  --diff-add-bg:     #0d3a1e;
+  --diff-add-lineno: #4ade80;
+  --diff-blank:      #161b22;
+  --diff-lineno:     #484f58;
+  --diff-gutter-del: #f87171;
+  --diff-gutter-add: #4ade80;
+}
+
+html, body { height: 100%; }
+
+body {
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* ── Landing / main page ──────────────────────────────────────── */
+.home-container {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 64px 24px;
+}
+
+.home-logo {
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+
+.home-tagline {
+  color: var(--muted);
+  margin-bottom: 40px;
+}
+
+.home-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 28px;
+  margin-bottom: 20px;
+}
+
+.home-card h2 { font-size: 16px; margin-bottom: 8px; }
+.home-card p  { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+
+.btn {
+  display: inline-block;
+  background: var(--accent);
+  color: #fff;
+  padding: 8px 18px;
+  border-radius: 6px;
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 500;
+  border: none;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.btn:hover { opacity: 0.85; }
+
+/* ── Diff viewer layout ───────────────────────────────────────── */
+.diff-page {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* Sidebar */
+.diff-sidebar {
+  width: 280px;
+  min-width: 240px;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar-title { font-weight: 600; font-size: 13px; color: var(--text); }
+
+.sidebar-count {
+  background: #30363d;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 20px;
+}
+
+.sidebar-list {
+  list-style: none;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.sidebar-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 16px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+  transition: background 0.1s;
+}
+.sidebar-item:hover    { background: rgba(255,255,255,0.04); }
+.sidebar-item.active   { background: rgba(59,130,212,0.12); border-left: 3px solid var(--accent); }
+
+.severity-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  margin-top: 6px;
+  flex-shrink: 0;
+}
+
+.sidebar-item-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sidebar-item-title { font-size: 12px; font-weight: 500; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sidebar-item-path  { font-size: 11px; color: var(--muted); font-family: monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Main diff area */
+.diff-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.diff-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.diff-header-left   { display: flex; align-items: center; gap: 10px; }
+.diff-severity-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 20px;
+  color: #fff;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
+
+.diff-issue-title   { font-size: 14px; font-weight: 600; color: var(--text); }
+.diff-filepath      { font-size: 12px; font-family: monospace; color: var(--muted); }
+
+.diff-description {
+  padding: 10px 20px;
+  font-size: 13px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+/* Split-screen diff container */
+.diff-split-container {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+.diff-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.diff-pane-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.diff-pane-header-left  { background: #2d1212; color: #f87171; }
+.diff-pane-header-right { background: #0d2a18; color: #4ade80; }
+
+.diff-pane-label    { font-size: 12px; }
+.diff-pane-filename { font-family: monospace; font-size: 11px; opacity: 0.7; }
+
+.diff-pane-body {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: auto;
+}
+
+.diff-divider {
+  width: 1px;
+  background: var(--border);
+  flex-shrink: 0;
+}
+
+/* Individual diff lines */
+.diff-line {
+  display: flex;
+  align-items: flex-start;
+  min-height: 22px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 22px;
+}
+
+.diff-lineno {
+  width: 44px;
+  min-width: 44px;
+  text-align: right;
+  padding-right: 12px;
+  padding-left: 6px;
+  user-select: none;
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+.diff-gutter {
+  width: 16px;
+  min-width: 16px;
+  text-align: center;
+  font-weight: 700;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.diff-code {
+  flex: 1;
+  padding: 0 8px;
+  white-space: pre;
+  tab-size: 2;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  background: transparent;
+  margin: 0;
+}
+
+/* Navigation */
+.diff-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
+}
+
+.diff-nav-btn {
+  background: #21262d;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.diff-nav-btn:hover:not(:disabled) { background: #30363d; }
+.diff-nav-btn:disabled { opacity: 0.4; cursor: default; }
+
+.diff-nav-counter { font-size: 13px; color: var(--muted); }
+
+.no-issues {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  color: var(--muted);
+}
+</file>
+
+<file path="app/layout.tsx">
+import type { Metadata } from "next";
+import "./globals.css";
+
+export const metadata: Metadata = {
+  title: "Blindspot",
+  description: "Local AI code reviewer",
+};
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <body>{children}</body>
+    </html>
+  );
+}
+</file>
+
+<file path="app/page.tsx">
+import Link from "next/link";
+
+export default function HomePage() {
+  return (
+    <div className="home-container">
+      <h1 className="home-logo">🔍 Blindspot</h1>
+      <p className="home-tagline">Local AI code reviewer — catches what git diff misses.</p>
+
+      <div className="home-card">
+        <h2>Side-by-Side Diff Viewer</h2>
+        <p>
+          Blindspot detected <strong>9 issues</strong> across{" "}
+          <code>lib/auth.js</code>, <code>lib/dataProcessor.js</code>, and{" "}
+          <code>lib/fileHandler.js</code> on this branch. Open the viewer to
+          inspect each finding — the left pane shows the original (buggy) code
+          highlighted in red; the right pane shows the corrected version in green.
+        </p>
+        <Link href="/diff-viewer" className="btn">
+          Open Diff Viewer →
+        </Link>
+      </div>
+
+      <div className="home-card">
+        <h2>Issues on this branch</h2>
+        <p>
+          This branch (<code>demo-wrong-code</code>) contains intentional code
+          bugs across three files — logic errors, security vulnerabilities, and
+          bad practices — designed to demonstrate Blindspot&apos;s detection and
+          side-by-side fix presentation.
+        </p>
+        <ul style={{ marginTop: 12, paddingLeft: 20, color: "var(--muted)", fontSize: 13 }}>
+          <li><code>lib/auth.js</code> — MD5 password hashing, timing attack, hardcoded secret, eval()</li>
+          <li><code>lib/dataProcessor.js</code> — off-by-one loop, array mutation, SQL injection</li>
+          <li><code>lib/fileHandler.js</code> — path traversal, sync I/O in async, missing encoding</li>
+        </ul>
+      </div>
+    </div>
+  );
+}
 </file>
 
 <file path="bob_sessions/.gitkeep">
@@ -1866,326 +2519,6 @@ module.exports = {
 };
 </file>
 
-<file path="cli/index.js">
-#!/usr/bin/env node
-
-const path = require("path");
-require("dotenv").config({ path: path.resolve(__dirname, "..", ".env") });
-
-const { execSync } = require("child_process");
-const fs = require("fs");
-const fsp = require("fs/promises");
-const http = require("http");
-const https = require("https");
-const os = require("os");
-const { Command } = require("commander");
-const cliProgress = require("cli-progress");
-const simpleGit = require("simple-git");
-const { runReviewAgent } = require("./engine");
-
-const SESSION_LOG_FILENAME = "bob-session-logs.json";
-
-const MODEL_DIR = path.join(os.homedir(), ".blindspot");
-const MODEL_PATH = path.join(MODEL_DIR, "model.gguf");
-const MODEL_URL =
-  "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf";
-const REPORT_FILENAME = "blindspot-report.md";
-
-const DIFF_EXCLUDE_PATHSPECS = [
-  ":!package-lock.json",
-  ":!yarn.lock",
-  ":!pnpm-lock.yaml",
-  ":!*.min.*",
-  ":!dist/*",
-  ":!.next/*",
-  ":!build/*",
-  ":!*.png",
-  ":!*.jpg",
-  ":!*.pdf",
-  ":!*.ico",
-  ":!*.wasm",
-  ":!*.sqlite",
-];
-
-const YELLOW = "\x1b[33m";
-const GREEN = "\x1b[32m";
-const RESET = "\x1b[0m";
-
-function modelExists() {
-  try {
-    fs.accessSync(MODEL_PATH, fs.constants.F_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function request(url, options = {}) {
-  const client = url.startsWith("https:") ? https : http;
-
-  return new Promise((resolve, reject) => {
-    const req = client.get(
-      url,
-      {
-        headers: {
-          "User-Agent": "blindspot-cli",
-          ...options.headers,
-        },
-      },
-      (res) => {
-        if (
-          res.statusCode >= 300 &&
-          res.statusCode < 400 &&
-          res.headers.location
-        ) {
-          const nextUrl = new URL(res.headers.location, url).toString();
-          res.resume();
-          request(nextUrl, options).then(resolve).catch(reject);
-          return;
-        }
-
-        if (res.statusCode !== 200) {
-          res.resume();
-          reject(
-            new Error(`Download failed with status ${res.statusCode} for ${url}`),
-          );
-          return;
-        }
-
-        resolve(res);
-      },
-    );
-
-    req.on("error", reject);
-  });
-}
-
-async function downloadModel() {
-  await fsp.mkdir(MODEL_DIR, { recursive: true });
-
-  console.log("Model not found. Downloading Llama-3.2-1B-Instruct-Q4_K_M...");
-  console.log(`Saving to ${MODEL_PATH}`);
-
-  const response = await request(MODEL_URL);
-  const totalBytes = Number.parseInt(response.headers["content-length"] || "0", 10);
-  const bar = new cliProgress.SingleBar(
-    {
-      format:
-        "Downloading |{bar}| {percentage}% | {value}/{total} MB | ETA: {eta}s",
-    },
-    cliProgress.Presets.shades_classic,
-  );
-
-  if (totalBytes > 0) {
-    bar.start(Math.ceil(totalBytes / (1024 * 1024)), 0);
-  } else {
-    bar.start(100, 0, { speed: "N/A" });
-  }
-
-  let downloaded = 0;
-
-  await new Promise((resolve, reject) => {
-    const fileStream = fs.createWriteStream(MODEL_PATH);
-
-    response.on("data", (chunk) => {
-      downloaded += chunk.length;
-
-      if (totalBytes > 0) {
-        bar.update(Math.ceil(downloaded / (1024 * 1024)));
-      } else {
-        const pseudoTotal = Math.max(
-          100,
-          Math.ceil(downloaded / (1024 * 1024)),
-        );
-        bar.setTotal(pseudoTotal);
-        bar.update(Math.ceil(downloaded / (1024 * 1024)));
-      }
-    });
-
-    response.on("error", (error) => {
-      fileStream.close();
-      bar.stop();
-      reject(error);
-    });
-
-    fileStream.on("error", (error) => {
-      bar.stop();
-      reject(error);
-    });
-
-    fileStream.on("finish", () => {
-      bar.stop();
-      resolve();
-    });
-
-    response.pipe(fileStream);
-  });
-
-  if (!modelExists()) {
-    throw new Error("Model download completed but file was not found on disk.");
-  }
-
-  console.log("Model download complete.");
-}
-
-function resolveGitRoot() {
-  try {
-    return execSync("git rev-parse --show-toplevel", {
-      encoding: "utf8",
-      cwd: process.cwd(),
-    }).trim();
-  } catch {
-    console.warn(
-      "Could not resolve git repository root. Using current working directory.",
-    );
-    return process.cwd();
-  }
-}
-
-async function collectGitDiff(gitRoot) {
-  const git = simpleGit(gitRoot);
-  const isRepo = await git.checkIsRepo();
-
-  if (!isRepo) {
-    return "";
-  }
-
-  const staged = await git.diff(["--cached", "--", ...DIFF_EXCLUDE_PATHSPECS]);
-  const unstaged = await git.diff(["--", ...DIFF_EXCLUDE_PATHSPECS]);
-
-  return [staged, unstaged].filter(Boolean).join("\n");
-}
-
-async function ensureGitignoreEntry(gitRoot, entry) {
-  const gitignorePath = path.join(gitRoot, ".gitignore");
-  let content = "";
-
-  try {
-    content = await fsp.readFile(gitignorePath, "utf8");
-  } catch (error) {
-    if (error.code !== "ENOENT") {
-      throw error;
-    }
-  }
-
-  const hasEntry = content
-    .split("\n")
-    .some((line) => line.trim() === entry);
-
-  if (hasEntry) {
-    return;
-  }
-
-  const needsNewline = content.length > 0 && !content.endsWith("\n");
-  const updated = content.length === 0 ? `${entry}\n` : `${content}${needsNewline ? "\n" : ""}${entry}\n`;
-  await fsp.writeFile(gitignorePath, updated, "utf8");
-}
-
-function startSpinner(message) {
-  const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-  let frameIndex = 0;
-
-  const interval = setInterval(() => {
-    process.stdout.write(`\r${frames[frameIndex % frames.length]} ${message}`);
-    frameIndex += 1;
-  }, 80);
-
-  return () => {
-    clearInterval(interval);
-    process.stdout.write("\r\x1b[K");
-  };
-}
-
-function resolveEngineProvider(cliProvider) {
-  const raw = cliProvider || process.env.ENGINE_PROVIDER || "bob";
-  return String(raw).trim().toLowerCase();
-}
-
-async function run(cliOptions = {}) {
-  const gitRoot = resolveGitRoot();
-  const provider = resolveEngineProvider(cliOptions.provider);
-  process.env.ENGINE_PROVIDER = provider;
-  const exportLogs = Boolean(cliOptions.exportLogs);
-
-  const diff = await collectGitDiff(gitRoot);
-  if (!diff.trim()) {
-    console.log(
-      `${YELLOW}No uncommitted changes found. Modify some files before running Blindspot.${RESET}`,
-    );
-    process.exit(0);
-  }
-
-  if (provider === "llama" && !modelExists()) {
-    await downloadModel();
-  }
-
-  const stopSpinner = startSpinner("Agent is analyzing your code...");
-  let markdown;
-  let telemetry = null;
-
-  try {
-    const review = await runReviewAgent(diff, gitRoot, MODEL_PATH, {
-      provider,
-    });
-    markdown = typeof review === "string" ? review : review.markdown;
-    telemetry = review && typeof review === "object" ? review.telemetry : null;
-    if (typeof markdown !== "string" || !markdown.trim()) {
-      throw new Error("Review engine did not return Markdown.");
-    }
-  } finally {
-    stopSpinner();
-  }
-
-  if (markdown.length > 60000) {
-    markdown =
-      markdown.slice(0, 60000) +
-      "\n\n---\n*Note: Report truncated to meet GitHub comment length limits.*";
-  }
-
-  const reportPath = path.join(process.cwd(), REPORT_FILENAME);
-  await fsp.writeFile(reportPath, markdown, "utf8");
-  await ensureGitignoreEntry(gitRoot, REPORT_FILENAME);
-  await ensureGitignoreEntry(gitRoot, SESSION_LOG_FILENAME);
-
-  if (exportLogs && telemetry != null) {
-    const logPath = path.join(process.cwd(), SESSION_LOG_FILENAME);
-    await fsp.writeFile(logPath, JSON.stringify(telemetry, null, 2), "utf8");
-  }
-
-  console.log(
-    `${GREEN}✅ Scan complete! Open blindspot-report.md to view your architectural review.${RESET}`,
-  );
-}
-
-const program = new Command();
-
-program
-  .name("blindspot")
-  .description("Local AI code reviewer")
-  .version("0.1.0")
-  .option(
-    "--provider <type>",
-    "Inference provider to use (bob or llama)",
-    "bob",
-  )
-  .option(
-    "--export-logs",
-    "Export session logs and telemetry to a local JSON file",
-  )
-  .action(async (options) => {
-    try {
-      await run(options);
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Unknown error during review";
-      console.error(message);
-      process.exit(1);
-    }
-  });
-
-program.parse();
-</file>
-
 <file path="evals/run.mjs">
 import { promises as fs } from "fs";
 import path from "path";
@@ -2549,6 +2882,164 @@ main().catch((error) => {
 });
 </file>
 
+<file path="lib/auth.js">
+// Authentication helpers
+const crypto = require("crypto");
+
+// BUG 1: MD5 is cryptographically broken — should never be used for passwords
+function hashPassword(password) {
+  return crypto.createHash("md5").update(password).digest("hex");
+}
+
+// BUG 2: Timing-safe comparison skipped — vulnerable to timing attacks
+function verifyToken(inputToken, storedToken) {
+  return inputToken === storedToken;
+}
+
+// BUG 3: Hardcoded secret — never commit secrets in source code
+const JWT_SECRET = "super_secret_key_12345";
+
+// BUG 4: eval() on user input — remote code execution risk
+function parseConfig(configStr) {
+  return eval(configStr);
+}
+
+// BUG 5: Unbounded recursion — no base-case guard, will stack-overflow on deep input
+function deepClone(obj) {
+  if (typeof obj !== "object") return obj;
+  const clone = {};
+  for (const key of Object.keys(obj)) {
+    clone[key] = deepClone(obj[key]);
+  }
+  return clone;
+}
+
+module.exports = { hashPassword, verifyToken, JWT_SECRET, parseConfig, deepClone };
+</file>
+
+<file path="lib/dataProcessor.js">
+// Data processing utilities
+
+// BUG 1: Off-by-one error — loop goes one past the array end
+function sumArray(arr) {
+  let total = 0;
+  for (let i = 0; i <= arr.length; i++) {
+    total += arr[i]; // arr[arr.length] is undefined → NaN
+  }
+  return total;
+}
+
+// BUG 2: Mutating the input array instead of a copy — unexpected side effects
+function removeDuplicates(items) {
+  for (let i = 0; i < items.length; i++) {
+    for (let j = i + 1; j < items.length; j++) {
+      if (items[i] === items[j]) {
+        items.splice(j, 1); // mutates caller's array
+        j--;
+      }
+    }
+  }
+  return items;
+}
+
+// BUG 3: Integer division discards remainder — silent precision loss
+function average(nums) {
+  return (nums.reduce((a, b) => a + b, 0) / nums.length) | 0; // bitwise OR truncates
+}
+
+// BUG 4: Swallowed error — exception silently returns null, hiding failures
+async function fetchData(url) {
+  try {
+    const res = await fetch(url);
+    return await res.json();
+  } catch (e) {
+    return null; // caller never knows the request failed
+  }
+}
+
+// BUG 5: SQL injection via string concatenation — should use parameterised queries
+function buildQuery(tableName, userId) {
+  return `SELECT * FROM ${tableName} WHERE id = ` + userId;
+}
+
+module.exports = { sumArray, removeDuplicates, average, fetchData, buildQuery };
+</file>
+
+<file path="lib/fileHandler.js">
+// File handling utilities
+const fs = require("fs");
+const path = require("path");
+
+// BUG 1: Path traversal — user-supplied filename not sanitised
+function readUserFile(baseDir, filename) {
+  const filePath = path.join(baseDir, filename); // "../../../etc/passwd" works!
+  return fs.readFileSync(filePath, "utf8");
+}
+
+// BUG 2: Synchronous fs call inside an async function — blocks the event loop
+async function countLines(filePath) {
+  const content = fs.readFileSync(filePath, "utf8"); // should be await fsp.readFile
+  return content.split("\n").length;
+}
+
+// BUG 3: Race condition — TOCTOU (check-then-act) on file existence
+function safeWrite(filePath, data) {
+  if (fs.existsSync(filePath)) {
+    throw new Error("File already exists");
+  }
+  // Another process could create the file between the check and write ↓
+  fs.writeFileSync(filePath, data);
+}
+
+// BUG 4: Missing encoding in readFile — returns Buffer, caller expects string
+function loadConfig(configPath) {
+  return fs.readFileSync(configPath); // missing "utf8" second arg
+}
+
+// BUG 5: Recursive delete without a root-path guard — rm -rf style footgun
+function deleteDir(dirPath) {
+  if (fs.existsSync(dirPath)) {
+    fs.readdirSync(dirPath).forEach((file) => {
+      const curPath = path.join(dirPath, file);
+      if (fs.lstatSync(curPath).isDirectory()) {
+        deleteDir(curPath); // no guard against deleting "/" or "C:\\"
+      } else {
+        fs.unlinkSync(curPath);
+      }
+    });
+    fs.rmdirSync(dirPath);
+  }
+}
+
+module.exports = { readUserFile, countLines, safeWrite, loadConfig, deleteDir };
+</file>
+
+<file path="lib/utils.js">
+const url = require("url");
+const fs = require("fs");
+
+function parseMyUrl(reqUrl) {
+  const myBuffer = Buffer.from(reqUrl);
+  const parsed = new URL(reqUrl);
+  
+  if (fs.access(parsed.pathname)) {
+    return true;
+  }
+  return false;
+}
+</file>
+
+<file path="test-app/package.json">
+{
+  "name": "test-app",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "lodash-utils": "^4.17.21"
+  }
+}
+</file>
+
 <file path=".blindspot-data.json">
 {
   "diff": "",
@@ -2576,7 +3067,7 @@ We are building a hybrid local developer tool consisting of a Node CLI and a Nex
 
 <file path=".env.example">
 # IBM Bob 2.0 (default review provider)
-BOB_API_KEY=https://bob.ibm.com/login?callback_uri=http://127.0.0.1:60630/bob-callback&state=ded189cf-d6eb-4335-966b-1184a64cfd4e
+BOB_API_KEY=
 BOB_LIVE_API=true
 # BOB_TEAM_ID=
 # BOB_API_URL=https://bob.ibm.com/login?callback_uri=http://127.0.0.1:60630/bob-callback&state=ded189cf-d6eb-4335-966b-1184a64cfd4e
@@ -2584,48 +3075,6 @@ BOB_LIVE_API=true
 
 # Provider selection: bob | llama
 # ENGINE_PROVIDER=bob
-</file>
-
-<file path=".gitignore">
-# dependencies
-/node_modules
-/.pnp
-.pnp.*
-.yarn/*
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/versions
-
-# testing
-/coverage
-
-# next.js
-/.next/
-/out/
-
-# production
-/build
-
-# misc
-.DS_Store
-*.pem
-
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-
-# env files
-.env
-.env*.local
-
-# vercel
-.vercel
-
-# typescript
-*.tsbuildinfo
 </file>
 
 <file path="ARCHITECTURE.md">
@@ -2668,114 +3117,6 @@ Legacy ES5 declarations must be modernized to ES2024+ standards.
 - New code introduced in a change must already meet this standard. A diff that adds any of the legacy forms above is a violation.
 </file>
 
-<file path="package.json">
-{
-  "name": "blindspot",
-  "version": "0.1.0",
-  "private": true,
-  "bin": {
-    "blindspot": "./cli/index.js"
-  },
-  "scripts": {
-    "start": "node cli/index.js",
-    "review": "node cli/index.js --provider bob --export-logs",
-    "review:llama": "node cli/index.js --provider llama --export-logs",
-    "eval": "node evals/run.mjs"
-  },
-  "dependencies": {
-    "cli-progress": "^3.12.0",
-    "commander": "^15.0.0",
-    "dotenv": "^18.0.3",
-    "node-llama-cpp": "^3.19.0",
-    "pdf-parse": "^1.1.1",
-    "simple-git": "^3.36.0"
-  }
-}
-</file>
-
-<file path="README.md">
-# Blindspot — Elite Autonomous PR Security & Architecture Reviewer
-
-Powered by IBM Bob 2.0.
-
-Blindspot reviews a git diff with three specialized subagents running in parallel, then a Manager Agent synthesizes one architectural report and a session telemetry log. Inference stays local: IBM Bob for the default path, or a GGUF model through `node-llama-cpp` when you choose the Llama provider. No OpenAI or Anthropic dependency is required.
-
-## How a review runs
-
-```mermaid
-flowchart LR
-  Diff["Git diff"]
-  Supply["Supply Chain subagent"]
-  Arch["Architecture and PDF/Markdown Compliance subagent"]
-  Legacy["Legacy Modernization subagent"]
-  Manager["Manager Agent"]
-  Report["blindspot-report.md"]
-  Logs["bob-session-logs.json"]
-
-  Diff --> Supply
-  Diff --> Arch
-  Diff --> Legacy
-  Supply --> Manager
-  Arch --> Manager
-  Legacy --> Manager
-  Manager --> Report
-  Manager --> Logs
-```
-
-The git diff is passed concurrently into the three subagents. The Manager Agent merges their findings into `blindspot-report.md` and exports session telemetry as `bob-session-logs.json`.
-
-## Key features
-
-- **Parallel subagent orchestration.** Supply Chain, Architecture & PDF/Markdown Compliance, and Legacy Modernization review the same diff at the same time. The Manager Agent writes the final report.
-- **Document understanding.** Reviews read project policy from `.cursorrules`, `ARCHITECTURE.md`, and PDF policy documents so findings follow the rules already in the repository.
-- **1-click GitHub remediation suggestions.** The GitHub Action posts `blindspot-report.md` on the pull request so reviewers can apply the suggested fixes from the comment.
-- **Silent supply-chain defense.** Dependency manifests are checked for floating specifiers and unvetted packages without a separate manual audit step.
-- **Session telemetry logging.** `npm run review` and `npm run review:llama` pass `--export-logs` and write `bob-session-logs.json` beside the report. Drop IBM Bob session screenshots in `bob_sessions/`.
-
-## Quickstart
-
-Requirements: Node.js 20+, a git checkout with uncommitted changes to review.
-
-```bash
-npm install
-npm run review
-```
-
-`npm run review` runs `node cli/index.js --provider bob --export-logs`. It writes `blindspot-report.md` and, when telemetry is produced, `bob-session-logs.json`.
-
-For fully local GGUF inference, the first Llama run downloads Llama-3.2-1B-Instruct (Q4_K_M) into `~/.blindspot/model.gguf` if it is not already there:
-
-```bash
-npm run review:llama
-```
-
-`npm run start` launches the CLI with its default provider. `npm run eval` runs the local evaluation harness in `evals/run.mjs`.
-
-Copy `.env.example` to `.env` and paste your IBM Bob API key:
-
-```bash
-cp .env.example .env
-```
-
-Set `BOB_API_KEY` in `.env` (or in the shell) when the Bob provider is configured for a live API (`BOB_LIVE_API=true`). The CLI loads `.env` from the project root automatically. It also accepts `ENGINE_PROVIDER` (`bob` or `llama`) when you invoke `node cli/index.js` directly.
-
-## GitHub Action
-
-The workflow at `.github/workflows/blindspot-review.yml` runs on pull request open, synchronize, and reopen.
-
-1. Copy that workflow into the repository if it is not already present.
-2. Add a repository secret named `BOB_API_KEY`.
-3. Open or update a pull request. The job checks out the repo with full history, installs dependencies with `npm ci`, and runs:
-
-```bash
-node cli/index.js --provider bob --export-logs
-```
-
-4. The sticky pull-request comment step publishes `blindspot-report.md` under the header `blindspot-architectural-review`.
-
-The job sets `ENGINE_PROVIDER=bob` and `BOB_LIVE_API=true`, and requests `contents: read` plus `pull-requests: write`.
-</file>
-
 <file path="tsconfig.json">
 {
   "compilerOptions": {
@@ -2804,6 +3145,721 @@ The job sets `ENGINE_PROVIDER=bob` and `BOB_LIVE_API=true`, and requests `conten
   "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
   "exclude": ["node_modules"]
 }
+</file>
+
+<file path="app/diff-viewer/page.tsx">
+import { promises as fsp } from "fs";
+import path from "path";
+import FileDiffViewerPage, { type DiffFile } from "./FileDiffViewerPage";
+
+// Force dynamic rendering so the server always reads the latest findings file
+export const dynamic = "force-dynamic";
+
+// ── Demo fallback data (shown when no live scan findings are present) ─────────
+const DEMO_FILES: DiffFile[] = [
+  {
+    filePath: "lib/auth.js",
+    title: "Broken-hash password storage (MD5)",
+    severity: "Critical",
+    description:
+      "MD5 is a broken hash function, trivially reversible via rainbow tables. " +
+      "Passwords must be hashed with a slow, salted KDF such as bcrypt or scrypt.",
+    originalCode: `function hashPassword(password) {
+  return crypto.createHash("md5").update(password).digest("hex");
+}`,
+    fixedCode: `const bcrypt = require("bcrypt");
+
+async function hashPassword(password) {
+  const saltRounds = 12;
+  return bcrypt.hash(password, saltRounds);
+}`,
+  },
+  {
+    filePath: "lib/auth.js",
+    title: "Timing-attack-vulnerable token comparison",
+    severity: "High",
+    description:
+      "String equality (===) exits early on the first mismatched character, " +
+      "leaking timing information. Use crypto.timingSafeEqual instead.",
+    originalCode: `function verifyToken(inputToken, storedToken) {
+  return inputToken === storedToken;
+}`,
+    fixedCode: `function verifyToken(inputToken, storedToken) {
+  const a = Buffer.from(inputToken);
+  const b = Buffer.from(storedToken);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}`,
+  },
+  {
+    filePath: "lib/auth.js",
+    title: "Hardcoded JWT secret in source code",
+    severity: "Critical",
+    description:
+      "Secrets committed to source code are exposed to anyone with repo access. " +
+      "Load secrets exclusively from environment variables at runtime.",
+    originalCode: `const JWT_SECRET = "super_secret_key_12345";`,
+    fixedCode: `const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) throw new Error("JWT_SECRET environment variable is not set");`,
+  },
+  {
+    filePath: "lib/auth.js",
+    title: "eval() on unsanitised user input (RCE)",
+    severity: "Critical",
+    description:
+      "eval() executes arbitrary JavaScript. Passing user-controlled input to it " +
+      "enables Remote Code Execution. Use JSON.parse or a safe schema validator.",
+    originalCode: `function parseConfig(configStr) {
+  return eval(configStr);
+}`,
+    fixedCode: `function parseConfig(configStr) {
+  return JSON.parse(configStr);
+}`,
+  },
+  {
+    filePath: "lib/dataProcessor.js",
+    title: "Off-by-one error in array loop",
+    severity: "High",
+    description:
+      "Loop condition is i <= arr.length, which reads arr[arr.length] — " +
+      "an out-of-bounds undefined, silently turning the sum into NaN.",
+    originalCode: `function sumArray(arr) {
+  let total = 0;
+  for (let i = 0; i <= arr.length; i++) {
+    total += arr[i];
+  }
+  return total;
+}`,
+    fixedCode: `function sumArray(arr) {
+  let total = 0;
+  for (let i = 0; i < arr.length; i++) {
+    total += arr[i];
+  }
+  return total;
+}`,
+  },
+  {
+    filePath: "lib/dataProcessor.js",
+    title: "Array mutation instead of copy in removeDuplicates",
+    severity: "Medium",
+    description:
+      "splice() mutates the original array passed by the caller. Work on a copy instead.",
+    originalCode: `function removeDuplicates(items) {
+  for (let i = 0; i < items.length; i++) {
+    for (let j = i + 1; j < items.length; j++) {
+      if (items[i] === items[j]) {
+        items.splice(j, 1);
+        j--;
+      }
+    }
+  }
+  return items;
+}`,
+    fixedCode: `function removeDuplicates(items) {
+  return [...new Set(items)];
+}`,
+  },
+  {
+    filePath: "lib/dataProcessor.js",
+    title: "SQL injection via string concatenation",
+    severity: "Critical",
+    description:
+      "Interpolating userId directly into the query allows arbitrary SQL injection. " +
+      "Always use parameterised queries.",
+    originalCode: `function buildQuery(tableName, userId) {
+  return \`SELECT * FROM \${tableName} WHERE id = \` + userId;
+}`,
+    fixedCode: `function buildQuery(tableName, userId) {
+  return { sql: "SELECT * FROM users WHERE id = ?", values: [userId] };
+}`,
+  },
+  {
+    filePath: "lib/fileHandler.js",
+    title: "Path traversal in file read",
+    severity: "Critical",
+    description:
+      "path.join does not prevent '../' segments — a caller can escape the intended base directory.",
+    originalCode: `function readUserFile(baseDir, filename) {
+  const filePath = path.join(baseDir, filename);
+  return fs.readFileSync(filePath, "utf8");
+}`,
+    fixedCode: `function readUserFile(baseDir, filename) {
+  const resolved = path.resolve(baseDir, filename);
+  if (!resolved.startsWith(path.resolve(baseDir) + path.sep)) {
+    throw new Error("Path traversal detected");
+  }
+  return fs.readFileSync(resolved, "utf8");
+}`,
+  },
+  {
+    filePath: "lib/fileHandler.js",
+    title: "Blocking fs.readFileSync inside async function",
+    severity: "Medium",
+    description:
+      "readFileSync blocks the Node.js event loop. Use the promise-based fs/promises API.",
+    originalCode: `async function countLines(filePath) {
+  const content = fs.readFileSync(filePath, "utf8");
+  return content.split("\\n").length;
+}`,
+    fixedCode: `const fsp = require("fs/promises");
+
+async function countLines(filePath) {
+  const content = await fsp.readFile(filePath, "utf8");
+  return content.split("\\n").length;
+}`,
+  },
+];
+
+// ── Load live findings from the CLI-written JSON if available ─────────────────
+async function loadFindings(): Promise<DiffFile[]> {
+  const findingsPath = path.join(process.cwd(), ".blindspot-findings.json");
+  try {
+    const raw = await fsp.readFile(findingsPath, "utf8");
+    const parsed = JSON.parse(raw) as DiffFile[];
+    if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+  } catch {
+    // File doesn't exist or is invalid — fall through to demo data
+  }
+  return DEMO_FILES;
+}
+
+export default async function DiffViewerPage() {
+  const files = await loadFindings();
+  return <FileDiffViewerPage files={files} />;
+}
+</file>
+
+<file path=".gitignore">
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files
+.env
+.env*.local
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+blindspot-report.md
+bob-session-logs.json
+blindspot-diff-viewer.html
+</file>
+
+<file path=".github/workflows/blindspot-review.yml">
+name: Blindspot AI Code Reviewer
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run Blindspot PR Review
+        env:
+          ENGINE_PROVIDER: 'bob'
+          BOB_API_KEY: ${{ secrets.BOB_API_KEY }}
+          BOB_LIVE_API: 'true'
+        run: |
+          git fetch origin ${{ github.event.pull_request.base.ref }}
+          git reset origin/${{ github.event.pull_request.base.ref }}
+          git add -A
+          node cli/index.js --provider bob --export-logs
+
+      - name: Post PR Review Comment
+        uses: marocchino/sticky-pull-request-comment@v2
+        if: always()
+        with:
+          path: blindspot-report.md
+          header: blindspot-architectural-review
+</file>
+
+<file path="package.json">
+{
+  "name": "blindspot",
+  "version": "0.1.0",
+  "private": true,
+  "bin": {
+    "blindspot": "./cli/index.js"
+  },
+  "scripts": {
+    "start": "node cli/index.js",
+    "review": "node cli/index.js --provider bob --export-logs",
+    "review:llama": "node cli/index.js --provider llama --export-logs",
+    "eval": "node evals/run.mjs",
+    "dev": "next dev",
+    "build": "next build",
+    "serve": "next start"
+  },
+  "dependencies": {
+    "cli-progress": "^3.12.0",
+    "commander": "^15.0.0",
+    "dotenv": "^18.0.3",
+    "next": "^15.5.26",
+    "node-llama-cpp": "^3.19.0",
+    "pdf-parse": "^1.1.1",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "simple-git": "^3.36.0"
+  },
+  "devDependencies": {
+    "@types/node": "20.17.6",
+    "@types/react": "19.3.0",
+    "typescript": "5.8.2"
+  }
+}
+</file>
+
+<file path="cli/index.js">
+#!/usr/bin/env node
+
+const path = require("path");
+require("dotenv").config({ path: path.resolve(__dirname, "..", ".env") });
+
+const { execSync } = require("child_process");
+const fs = require("fs");
+const fsp = require("fs/promises");
+const https = require("https");
+const os = require("os");
+const readline = require("readline");
+const { Command } = require("commander");
+const cliProgress = require("cli-progress");
+const simpleGit = require("simple-git");
+const { runReviewAgent } = require("./engine");
+
+const SESSION_LOG_FILENAME = "bob-session-logs.json";
+
+const MODEL_DIR = path.join(os.homedir(), ".blindspot");
+const MODEL_PATH = path.join(MODEL_DIR, "model.gguf");
+const MODEL_URL =
+  "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf";
+const REPORT_FILENAME = "blindspot-report.md";
+
+const DIFF_EXCLUDE_PATHSPECS = [
+  ":!package-lock.json",
+  ":!yarn.lock",
+  ":!pnpm-lock.yaml",
+  ":!*.min.*",
+  ":!dist/*",
+  ":!.next/*",
+  ":!build/*",
+  ":!*.png",
+  ":!*.jpg",
+  ":!*.pdf",
+  ":!*.ico",
+  ":!*.wasm",
+  ":!*.sqlite",
+];
+
+const YELLOW = "\x1b[33m";
+const GREEN = "\x1b[32m";
+const RESET = "\x1b[0m";
+
+function modelExists() {
+  try {
+    fs.accessSync(MODEL_PATH, fs.constants.F_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function request(url, options = {}) {
+  const client = url.startsWith("https:") ? https : http;
+
+  return new Promise((resolve, reject) => {
+    const req = client.get(
+      url,
+      {
+        headers: {
+          "User-Agent": "blindspot-cli",
+          ...options.headers,
+        },
+      },
+      (res) => {
+        if (
+          res.statusCode >= 300 &&
+          res.statusCode < 400 &&
+          res.headers.location
+        ) {
+          const nextUrl = new URL(res.headers.location, url).toString();
+          res.resume();
+          request(nextUrl, options).then(resolve).catch(reject);
+          return;
+        }
+
+        if (res.statusCode !== 200) {
+          res.resume();
+          reject(
+            new Error(`Download failed with status ${res.statusCode} for ${url}`),
+          );
+          return;
+        }
+
+        resolve(res);
+      },
+    );
+
+    req.on("error", reject);
+  });
+}
+
+async function downloadModel() {
+  await fsp.mkdir(MODEL_DIR, { recursive: true });
+
+  console.log("Model not found. Downloading Llama-3.2-1B-Instruct-Q4_K_M...");
+  console.log(`Saving to ${MODEL_PATH}`);
+
+  const response = await request(MODEL_URL);
+  const totalBytes = Number.parseInt(response.headers["content-length"] || "0", 10);
+  const bar = new cliProgress.SingleBar(
+    {
+      format:
+        "Downloading |{bar}| {percentage}% | {value}/{total} MB | ETA: {eta}s",
+    },
+    cliProgress.Presets.shades_classic,
+  );
+
+  if (totalBytes > 0) {
+    bar.start(Math.ceil(totalBytes / (1024 * 1024)), 0);
+  } else {
+    bar.start(100, 0, { speed: "N/A" });
+  }
+
+  let downloaded = 0;
+
+  await new Promise((resolve, reject) => {
+    const fileStream = fs.createWriteStream(MODEL_PATH);
+
+    response.on("data", (chunk) => {
+      downloaded += chunk.length;
+
+      if (totalBytes > 0) {
+        bar.update(Math.ceil(downloaded / (1024 * 1024)));
+      } else {
+        const pseudoTotal = Math.max(
+          100,
+          Math.ceil(downloaded / (1024 * 1024)),
+        );
+        bar.setTotal(pseudoTotal);
+        bar.update(Math.ceil(downloaded / (1024 * 1024)));
+      }
+    });
+
+    response.on("error", (error) => {
+      fileStream.close();
+      bar.stop();
+      reject(error);
+    });
+
+    fileStream.on("error", (error) => {
+      bar.stop();
+      reject(error);
+    });
+
+    fileStream.on("finish", () => {
+      bar.stop();
+      resolve();
+    });
+
+    response.pipe(fileStream);
+  });
+
+  if (!modelExists()) {
+    throw new Error("Model download completed but file was not found on disk.");
+  }
+
+  console.log("Model download complete.");
+}
+
+function resolveGitRoot() {
+  try {
+    return execSync("git rev-parse --show-toplevel", {
+      encoding: "utf8",
+      cwd: process.cwd(),
+    }).trim();
+  } catch {
+    console.warn(
+      "Could not resolve git repository root. Using current working directory.",
+    );
+    return process.cwd();
+  }
+}
+
+async function collectGitDiff(gitRoot) {
+  const git = simpleGit(gitRoot);
+  const isRepo = await git.checkIsRepo();
+
+  if (!isRepo) {
+    return "";
+  }
+
+  const staged = await git.diff(["--cached", "--", ...DIFF_EXCLUDE_PATHSPECS]);
+  const unstaged = await git.diff(["--", ...DIFF_EXCLUDE_PATHSPECS]);
+
+  return [staged, unstaged].filter(Boolean).join("\n");
+}
+
+async function ensureGitignoreEntry(gitRoot, entry) {
+  const gitignorePath = path.join(gitRoot, ".gitignore");
+  let content = "";
+
+  try {
+    content = await fsp.readFile(gitignorePath, "utf8");
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  const hasEntry = content
+    .split("\n")
+    .some((line) => line.trim() === entry);
+
+  if (hasEntry) {
+    return;
+  }
+
+  const needsNewline = content.length > 0 && !content.endsWith("\n");
+  const updated = content.length === 0 ? `${entry}\n` : `${content}${needsNewline ? "\n" : ""}${entry}\n`;
+  await fsp.writeFile(gitignorePath, updated, "utf8");
+}
+
+function startSpinner(message) {
+  const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  let frameIndex = 0;
+
+  const interval = setInterval(() => {
+    process.stdout.write(`\r${frames[frameIndex % frames.length]} ${message}`);
+    frameIndex += 1;
+  }, 80);
+
+  return () => {
+    clearInterval(interval);
+    process.stdout.write("\r\x1b[K");
+  };
+}
+
+function resolveEngineProvider(cliProvider) {
+  const raw = cliProvider || process.env.ENGINE_PROVIDER || "bob";
+  return String(raw).trim().toLowerCase();
+}
+
+async function run(cliOptions = {}) {
+  const gitRoot = resolveGitRoot();
+  const provider = resolveEngineProvider(cliOptions.provider);
+  process.env.ENGINE_PROVIDER = provider;
+  const exportLogs = Boolean(cliOptions.exportLogs);
+
+  const diff = await collectGitDiff(gitRoot);
+  if (!diff.trim()) {
+    console.log(
+      `${YELLOW}No uncommitted changes found. Modify some files before running Blindspot.${RESET}`,
+    );
+    process.exit(0);
+  }
+
+  if (provider === "llama" && !modelExists()) {
+    await downloadModel();
+  }
+
+  const stopSpinner = startSpinner("Agent is analyzing your code...");
+  let markdown;
+  let telemetry = null;
+
+  try {
+    const review = await runReviewAgent(diff, gitRoot, MODEL_PATH, {
+      provider,
+    });
+    markdown = typeof review === "string" ? review : review.markdown;
+    telemetry = review && typeof review === "object" ? review.telemetry : null;
+    if (typeof markdown !== "string" || !markdown.trim()) {
+      throw new Error("Review engine did not return Markdown.");
+    }
+  } finally {
+    stopSpinner();
+  }
+
+  if (markdown.length > 60000) {
+    markdown =
+      markdown.slice(0, 60000) +
+      "\n\n---\n*Note: Report truncated to meet GitHub comment length limits.*";
+  }
+
+  const reportPath = path.join(process.cwd(), REPORT_FILENAME);
+  await fsp.writeFile(reportPath, markdown, "utf8");
+  await ensureGitignoreEntry(gitRoot, REPORT_FILENAME);
+  await ensureGitignoreEntry(gitRoot, SESSION_LOG_FILENAME);
+
+  if (exportLogs && telemetry != null) {
+    const logPath = path.join(process.cwd(), SESSION_LOG_FILENAME);
+    await fsp.writeFile(logPath, JSON.stringify(telemetry, null, 2), "utf8");
+  }
+
+  console.log(`${GREEN}✅ Scan complete! Report saved to blindspot-report.md${RESET}`);
+
+  // Interactive Fix Mode
+  // Capture: title, file path, optional original block, suggestion block
+  const suggestionRegex = /### (.*?)\n[\s\S]*?- \*\*File:\*\* `(.*?)`[\s\S]*?(?:```original\n([\s\S]*?)```[\s\S]*?)?```suggestion\n([\s\S]*?)```/g;
+  const matches = [...markdown.matchAll(suggestionRegex)];
+
+  if (matches.length > 0) {
+    console.log(`\n${YELLOW}Blindspot found ${matches.length} auto-fixable issues.${RESET}`);
+
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+    const askQuestion = (query) => new Promise((resolve) => rl.question(query, resolve));
+
+    for (const match of matches) {
+      const [_, title, filePath, originalCode, suggestedCode] = match;
+      const fixedCode = suggestedCode.trim();
+
+      console.log(`\n--------------------------------------------------`);
+      console.log(`${YELLOW}Issue:${RESET} ${title}`);
+      console.log(`${YELLOW}File:${RESET} ${filePath}`);
+      if (originalCode) {
+        console.log(`${YELLOW}Original:${RESET}\n${originalCode.trim()}`);
+      }
+      console.log(`${GREEN}Suggested Fix:${RESET}\n${fixedCode}`);
+      console.log(`--------------------------------------------------`);
+
+      const answer = await askQuestion(`Apply this fix to ${filePath}? [y/N]: `);
+
+      if (answer.toLowerCase() === "y") {
+        try {
+          const absolutePath = path.resolve(gitRoot, filePath);
+          const fileContent = await fsp.readFile(absolutePath, "utf8");
+
+          let updatedContent;
+          if (originalCode) {
+            // Precise search-and-replace: swap original block with suggested fix
+            const original = originalCode.trim();
+            if (!fileContent.includes(original)) {
+              console.log(`\x1b[31mCould not locate original snippet in ${filePath}. Skipping.${RESET}`);
+              continue;
+            }
+            updatedContent = fileContent.replace(original, fixedCode);
+          } else {
+            // No original block provided — find the rule whose pattern matches this
+            // finding's title, then apply only that rule across the file's lines.
+            const INLINE_RULES = [
+              { title: /buffer/i,   pattern: /\bnew Buffer\s*\(/,   fix: (l) => l.replace(/\bnew Buffer\s*\(/, "Buffer.from(") },
+              { title: /url\.parse/i, pattern: /\burl\.parse\s*\(/, fix: (l) => l.replace(/\burl\.parse\s*\(/, "new URL(") },
+              { title: /fs\.exists/i, pattern: /\bfs\.exists\s*\(/, fix: (l) => l.replace(/\bfs\.exists\s*\(/, "fs.access(") },
+              { title: /substr/i,   pattern: /\.substr\s*\(/,       fix: (l) => l.replace(/\.substr\s*\(\s*([^,)]+)\s*,\s*([^)]+)\)/, ".slice($1, $1 + $2)") },
+              { title: /var/i,      pattern: /\bvar\s+/,            fix: (l) => l.replace(/\bvar\b/g, "const") },
+            ];
+            const rule = INLINE_RULES.find((r) => r.title.test(title));
+            if (!rule) {
+              console.log(`\x1b[31mNo rule matched finding "${title}". Skipping.${RESET}`);
+              continue;
+            }
+            const lines = fileContent.split("\n");
+            let changed = false;
+            const patched = lines.map((line) => {
+              if (rule.pattern.test(line)) {
+                changed = true;
+                return rule.fix(line);
+              }
+              return line;
+            });
+            if (!changed) {
+              console.log(`\x1b[31mPattern for "${title}" not found in ${filePath} — already fixed or not present. Skipping.${RESET}`);
+              continue;
+            }
+            updatedContent = patched.join("\n");
+          }
+
+          await fsp.writeFile(absolutePath, updatedContent, "utf8");
+          console.log(`${GREEN}✔ Fix applied to ${filePath}${RESET}`);
+        } catch (err) {
+          console.log(`\x1b[31mFailed to modify file: ${err.message}${RESET}`);
+        }
+      } else {
+        console.log(`Skipped.`);
+      }
+    }
+    rl.close();
+  }
+}
+
+const program = new Command();
+
+program
+  .name("blindspot")
+  .description("Local AI code reviewer")
+  .version("0.1.0")
+  .option(
+    "--provider <type>",
+    "Inference provider to use (bob or llama)",
+    "bob",
+  )
+  .option(
+    "--export-logs",
+    "Export session logs and telemetry to a local JSON file",
+  )
+  .action(async (options) => {
+    try {
+      await run(options);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unknown error during review";
+      console.error(message);
+      process.exit(1);
+    }
+  });
+
+program.parse();
 </file>
 
 </files>

@@ -39,3 +39,4 @@ yarn-error.log*
 *.tsbuildinfo
 blindspot-report.md
 bob-session-logs.json
+blindspot-diff-viewer.html
