@@ -10,6 +10,7 @@
     "review": "node cli/index.js --provider bob --export-logs",
     "review:llama": "node cli/index.js --provider llama --export-logs",
     "eval": "node evals/run.mjs",
+    "demo": "node cli/index.js --diff-viewer --provider bob --export-logs",
     "dev": "next dev",
     "build": "next build",
     "serve": "next start"

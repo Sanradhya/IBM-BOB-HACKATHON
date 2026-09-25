@@ -386,13 +386,90 @@ async function run(cliOptions = {}) {
 // No server is started — the CLI exits cleanly as soon as the panel opens.
 const DIFF_HTML_FILENAME = "blindspot-diff-viewer.html";
 
-async function launchDiffViewer(gitRoot, markdown) {
-  // ── 1. Parse findings ──────────────────────────────────────────────────────
-  const findings = parseFindingsForViewer(markdown);
+// Fallback demo findings shown when the live scan produces no suggestion blocks
+// (e.g. when the diff only contains already-fixed code, or on the demo branch).
+const DEMO_FINDINGS = [
+  {
+    filePath: "lib/auth.js",
+    title: "Broken-hash password storage (MD5)",
+    severity: "Critical",
+    description: "MD5 is cryptographically broken — trivially reversible via rainbow tables. Use bcrypt or scrypt.",
+    originalCode: `function hashPassword(password) {\n  return crypto.createHash("md5").update(password).digest("hex");\n}`,
+    fixedCode: `const bcrypt = require("bcrypt");\n\nasync function hashPassword(password) {\n  return bcrypt.hash(password, 12);\n}`,
+  },
+  {
+    filePath: "lib/auth.js",
+    title: "Timing-attack-vulnerable token comparison",
+    severity: "High",
+    description: "=== exits early on the first mismatched character, leaking timing. Use crypto.timingSafeEqual.",
+    originalCode: `function verifyToken(inputToken, storedToken) {\n  return inputToken === storedToken;\n}`,
+    fixedCode: `function verifyToken(inputToken, storedToken) {\n  const a = Buffer.from(inputToken);\n  const b = Buffer.from(storedToken);\n  if (a.length !== b.length) return false;\n  return crypto.timingSafeEqual(a, b);\n}`,
+  },
+  {
+    filePath: "lib/auth.js",
+    title: "Hardcoded JWT secret in source code",
+    severity: "Critical",
+    description: "Secrets committed to source code are visible to anyone with repo access. Use environment variables.",
+    originalCode: `const JWT_SECRET = "super_secret_key_12345";`,
+    fixedCode: `const JWT_SECRET = process.env.JWT_SECRET;\nif (!JWT_SECRET) throw new Error("JWT_SECRET env var is not set");`,
+  },
+  {
+    filePath: "lib/auth.js",
+    title: "eval() on user-controlled input (RCE)",
+    severity: "Critical",
+    description: "eval() executes arbitrary JavaScript — passing user input to it is Remote Code Execution.",
+    originalCode: `function parseConfig(configStr) {\n  return eval(configStr);\n}`,
+    fixedCode: `function parseConfig(configStr) {\n  return JSON.parse(configStr);\n}`,
+  },
+  {
+    filePath: "lib/dataProcessor.js",
+    title: "Off-by-one error in array loop",
+    severity: "High",
+    description: "i <= arr.length reads arr[arr.length] which is undefined, silently corrupting the sum to NaN.",
+    originalCode: `function sumArray(arr) {\n  let total = 0;\n  for (let i = 0; i <= arr.length; i++) {\n    total += arr[i];\n  }\n  return total;\n}`,
+    fixedCode: `function sumArray(arr) {\n  let total = 0;\n  for (let i = 0; i < arr.length; i++) {\n    total += arr[i];\n  }\n  return total;\n}`,
+  },
+  {
+    filePath: "lib/dataProcessor.js",
+    title: "Array mutation in removeDuplicates",
+    severity: "Medium",
+    description: "splice() mutates the caller's original array — unexpected side-effect for the call site.",
+    originalCode: `function removeDuplicates(items) {\n  for (let i = 0; i < items.length; i++) {\n    for (let j = i + 1; j < items.length; j++) {\n      if (items[i] === items[j]) { items.splice(j, 1); j--; }\n    }\n  }\n  return items;\n}`,
+    fixedCode: `function removeDuplicates(items) {\n  return [...new Set(items)];\n}`,
+  },
+  {
+    filePath: "lib/dataProcessor.js",
+    title: "SQL injection via string concatenation",
+    severity: "Critical",
+    description: "Interpolating userId directly allows an attacker to inject arbitrary SQL. Use parameterised queries.",
+    originalCode: "function buildQuery(tableName, userId) {\n  return `SELECT * FROM ${tableName} WHERE id = ` + userId;\n}",
+    fixedCode: `function buildQuery(tableName, userId) {\n  return { sql: "SELECT * FROM users WHERE id = ?", values: [userId] };\n}`,
+  },
+  {
+    filePath: "lib/fileHandler.js",
+    title: "Path traversal in file read",
+    severity: "Critical",
+    description: "path.join does not strip '../' — a caller can escape the base directory (e.g. ../../etc/passwd).",
+    originalCode: `function readUserFile(baseDir, filename) {\n  const filePath = path.join(baseDir, filename);\n  return fs.readFileSync(filePath, "utf8");\n}`,
+    fixedCode: `function readUserFile(baseDir, filename) {\n  const resolved = path.resolve(baseDir, filename);\n  if (!resolved.startsWith(path.resolve(baseDir) + path.sep))\n    throw new Error("Path traversal detected");\n  return fs.readFileSync(resolved, "utf8");\n}`,
+  },
+  {
+    filePath: "lib/fileHandler.js",
+    title: "Blocking readFileSync inside async function",
+    severity: "Medium",
+    description: "readFileSync blocks the Node.js event loop, stalling all concurrent requests.",
+    originalCode: `async function countLines(filePath) {\n  const content = fs.readFileSync(filePath, "utf8");\n  return content.split("\\n").length;\n}`,
+    fixedCode: `const fsp = require("fs/promises");\n\nasync function countLines(filePath) {\n  const content = await fsp.readFile(filePath, "utf8");\n  return content.split("\\n").length;\n}`,
+  },
+];
 
-  if (findings.length === 0) {
-    console.log(`${YELLOW}No auto-fixable findings to display in the diff viewer.${RESET}`);
-    return;
+async function launchDiffViewer(gitRoot, markdown) {
+  // ── 1. Parse findings from scan markdown; fall back to demo set ───────────
+  let findings = parseFindingsForViewer(markdown);
+  const usingDemo = findings.length === 0;
+  if (usingDemo) {
+    findings = DEMO_FINDINGS;
+    console.log(`${YELLOW}No suggestion blocks in scan report — showing demo findings from this branch.${RESET}`);
   }
 
   // ── 2. Write self-contained HTML file ─────────────────────────────────────
@@ -404,9 +481,9 @@ async function launchDiffViewer(gitRoot, markdown) {
   // ── 3. Open inside IDE — no server, no hanging process ────────────────────
   openInIde(htmlPath);
 
-  console.log(`\n${GREEN}✅ Diff viewer opened — ${findings.length} issue(s) found${RESET}`);
+  console.log(`\n${GREEN}✅ Diff viewer opened — ${findings.length} issue(s)${usingDemo ? " (demo)" : ""}${RESET}`);
   console.log(`   File: ${htmlPath}\n`);
-  // CLI exits immediately here — no await, no server to keep alive
+  // CLI exits immediately — no await, no server to keep alive
 }
 
 // ── Parse findings from scan markdown ────────────────────────────────────────
