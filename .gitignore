@@ -37,3 +37,5 @@ yarn-error.log*
 
 # typescript
 *.tsbuildinfo
+blindspot-report.md
+bob-session-logs.json

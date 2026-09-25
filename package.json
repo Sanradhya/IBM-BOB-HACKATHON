@@ -16,6 +16,7 @@
     "commander": "^15.0.0",
     "dotenv": "^18.0.3",
     "node-llama-cpp": "^3.19.0",
+    "lodash-utils": "^4.17.21",
     "pdf-parse": "^1.1.1",
     "simple-git": "^3.36.0"
   }
