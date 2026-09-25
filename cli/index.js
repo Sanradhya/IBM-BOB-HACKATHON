@@ -9,6 +9,7 @@ const fsp = require("fs/promises");
 const http = require("http");
 const https = require("https");
 const os = require("os");
+const readline = require("readline");
 const { Command } = require("commander");
 const cliProgress = require("cli-progress");
 const simpleGit = require("simple-git");
@@ -283,9 +284,184 @@ async function run(cliOptions = {}) {
     await fsp.writeFile(logPath, JSON.stringify(telemetry, null, 2), "utf8");
   }
 
-  console.log(
-    `${GREEN}✅ Scan complete! Open blindspot-report.md to view your architectural review.${RESET}`,
+  console.log(`${GREEN}✅ Scan complete! Report saved to blindspot-report.md${RESET}`);
+
+  // ── Diff Viewer: launch the side-by-side UI when --diff-viewer is set ─────
+  if (cliOptions.diffViewer) {
+    await launchDiffViewer(gitRoot);
+    return; // Skip interactive CLI fix-mode; the UI handles it
+  }
+
+  // Interactive Fix Mode
+  // Capture: title, file path, optional original block, suggestion block
+  const suggestionRegex = /### (.*?)\n[\s\S]*?- \*\*File:\*\* `(.*?)`[\s\S]*?(?:```original\n([\s\S]*?)```[\s\S]*?)?```suggestion\n([\s\S]*?)```/g;
+  const matches = [...markdown.matchAll(suggestionRegex)];
+
+  if (matches.length > 0) {
+    console.log(`\n${YELLOW}Blindspot found ${matches.length} auto-fixable issues.${RESET}`);
+
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+    const askQuestion = (query) => new Promise((resolve) => rl.question(query, resolve));
+
+    for (const match of matches) {
+      const [_, title, filePath, originalCode, suggestedCode] = match;
+      const fixedCode = suggestedCode.trim();
+
+      console.log(`\n--------------------------------------------------`);
+      console.log(`${YELLOW}Issue:${RESET} ${title}`);
+      console.log(`${YELLOW}File:${RESET} ${filePath}`);
+      if (originalCode) {
+        console.log(`${YELLOW}Original:${RESET}\n${originalCode.trim()}`);
+      }
+      console.log(`${GREEN}Suggested Fix:${RESET}\n${fixedCode}`);
+      console.log(`--------------------------------------------------`);
+
+      const answer = await askQuestion(`Apply this fix to ${filePath}? [y/N]: `);
+
+      if (answer.toLowerCase() === "y") {
+        try {
+          const absolutePath = path.resolve(gitRoot, filePath);
+          const fileContent = await fsp.readFile(absolutePath, "utf8");
+
+          let updatedContent;
+          if (originalCode) {
+            // Precise search-and-replace: swap original block with suggested fix
+            const original = originalCode.trim();
+            if (!fileContent.includes(original)) {
+              console.log(`\x1b[31mCould not locate original snippet in ${filePath}. Skipping.${RESET}`);
+              continue;
+            }
+            updatedContent = fileContent.replace(original, fixedCode);
+          } else {
+            // No original block provided — find the rule whose pattern matches this
+            // finding's title, then apply only that rule across the file's lines.
+            const INLINE_RULES = [
+              { title: /buffer/i,   pattern: /\bnew Buffer\s*\(/,   fix: (l) => l.replace(/\bnew Buffer\s*\(/, "Buffer.from(") },
+              { title: /url\.parse/i, pattern: /\burl\.parse\s*\(/, fix: (l) => l.replace(/\burl\.parse\s*\(/, "new URL(") },
+              { title: /fs\.exists/i, pattern: /\bfs\.exists\s*\(/, fix: (l) => l.replace(/\bfs\.exists\s*\(/, "fs.access(") },
+              { title: /substr/i,   pattern: /\.substr\s*\(/,       fix: (l) => l.replace(/\.substr\s*\(\s*([^,)]+)\s*,\s*([^)]+)\)/, ".slice($1, $1 + $2)") },
+              { title: /var/i,      pattern: /\bvar\s+/,            fix: (l) => l.replace(/\bvar\b/g, "const") },
+            ];
+            const rule = INLINE_RULES.find((r) => r.title.test(title));
+            if (!rule) {
+              console.log(`\x1b[31mNo rule matched finding "${title}". Skipping.${RESET}`);
+              continue;
+            }
+            const lines = fileContent.split("\n");
+            let changed = false;
+            const patched = lines.map((line) => {
+              if (rule.pattern.test(line)) {
+                changed = true;
+                return rule.fix(line);
+              }
+              return line;
+            });
+            if (!changed) {
+              console.log(`\x1b[31mPattern for "${title}" not found in ${filePath} — already fixed or not present. Skipping.${RESET}`);
+              continue;
+            }
+            updatedContent = patched.join("\n");
+          }
+
+          await fsp.writeFile(absolutePath, updatedContent, "utf8");
+          console.log(`${GREEN}✔ Fix applied to ${filePath}${RESET}`);
+        } catch (err) {
+          console.log(`\x1b[31mFailed to modify file: ${err.message}${RESET}`);
+        }
+      } else {
+        console.log(`Skipped.`);
+      }
+    }
+    rl.close();
+  }
+}
+
+// ── Diff Viewer launcher ──────────────────────────────────────────────────────
+// Starts `next dev` (or `next start` if a build exists) on a free port and
+// opens the /diff-viewer page in the user's default browser.
+async function launchDiffViewer(gitRoot) {
+  const VIEWER_PORT = 3579;
+  const viewerUrl = `http://localhost:${VIEWER_PORT}/diff-viewer`;
+
+  // Detect whether a production build is available
+  const buildIdPath = path.join(gitRoot, ".next", "BUILD_ID");
+  let hasProductionBuild = false;
+  try {
+    fs.accessSync(buildIdPath, fs.constants.F_OK);
+    hasProductionBuild = true;
+  } catch {
+    hasProductionBuild = false;
+  }
+
+  const nextCmd = hasProductionBuild ? "next start" : "next dev";
+  const nextBin = path.join(gitRoot, "node_modules", ".bin", "next");
+
+  console.log(`\n${YELLOW}Launching diff viewer at ${viewerUrl}${RESET}`);
+  console.log(`Using: ${nextCmd} (port ${VIEWER_PORT})`);
+
+  // Spawn the Next.js server in the background
+  const { spawn } = require("child_process");
+  const serverProc = spawn(
+    nextBin,
+    [hasProductionBuild ? "start" : "dev", "--port", String(VIEWER_PORT)],
+    { cwd: gitRoot, stdio: "pipe", detached: false },
   );
+
+  serverProc.stderr.on("data", () => {}); // suppress noise
+  serverProc.on("error", (err) => {
+    console.error(`\x1b[31mFailed to start diff viewer server: ${err.message}${RESET}`);
+  });
+
+  // Poll until the server responds, then open the browser
+  await waitForServer(viewerUrl, 30_000);
+
+  openBrowser(viewerUrl);
+
+  console.log(`\n${GREEN}Diff viewer open at ${viewerUrl}${RESET}`);
+  console.log(`Press Ctrl+C to stop the viewer server.\n`);
+
+  // Keep the CLI alive so the server stays up
+  await new Promise((resolve) => {
+    process.on("SIGINT", () => {
+      serverProc.kill();
+      resolve(undefined);
+    });
+  });
+}
+
+async function waitForServer(url, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      await new Promise((resolve, reject) => {
+        const client = url.startsWith("https:") ? https : http;
+        const req = client.get(url, (res) => { res.resume(); resolve(); });
+        req.on("error", reject);
+        req.setTimeout(500, () => { req.destroy(); reject(new Error("timeout")); });
+      });
+      return; // server is up
+    } catch {
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  }
+  console.warn(`${YELLOW}Timed out waiting for the diff viewer server.${RESET}`);
+}
+
+function openBrowser(url) {
+  const { platform } = process;
+  const cmd =
+    platform === "win32" ? `start "" "${url}"` :
+    platform === "darwin" ? `open "${url}"` :
+    `xdg-open "${url}"`;
+  try {
+    execSync(cmd, { stdio: "ignore" });
+  } catch {
+    console.log(`${YELLOW}Open your browser at: ${url}${RESET}`);
+  }
 }
 
 const program = new Command();
@@ -302,6 +478,10 @@ program
   .option(
     "--export-logs",
     "Export session logs and telemetry to a local JSON file",
+  )
+  .option(
+    "--diff-viewer",
+    "After scanning, open a side-by-side diff viewer in the browser (requires Next.js)",
   )
   .action(async (options) => {
     try {
