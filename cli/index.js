@@ -6,9 +6,9 @@ require("dotenv").config({ path: path.resolve(__dirname, "..", ".env") });
 const { execSync } = require("child_process");
 const fs = require("fs");
 const fsp = require("fs/promises");
-const http = require("http");
 const https = require("https");
 const os = require("os");
+const readline = require("readline");
 const { Command } = require("commander");
 const cliProgress = require("cli-progress");
 const simpleGit = require("simple-git");
@@ -283,9 +283,94 @@ async function run(cliOptions = {}) {
     await fsp.writeFile(logPath, JSON.stringify(telemetry, null, 2), "utf8");
   }
 
-  console.log(
-    `${GREEN}✅ Scan complete! Open blindspot-report.md to view your architectural review.${RESET}`,
-  );
+  console.log(`${GREEN}✅ Scan complete! Report saved to blindspot-report.md${RESET}`);
+
+  // Interactive Fix Mode
+  // Capture: title, file path, optional original block, suggestion block
+  const suggestionRegex = /### (.*?)\n[\s\S]*?- \*\*File:\*\* `(.*?)`[\s\S]*?(?:```original\n([\s\S]*?)```[\s\S]*?)?```suggestion\n([\s\S]*?)```/g;
+  const matches = [...markdown.matchAll(suggestionRegex)];
+
+  if (matches.length > 0) {
+    console.log(`\n${YELLOW}Blindspot found ${matches.length} auto-fixable issues.${RESET}`);
+
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+    const askQuestion = (query) => new Promise((resolve) => rl.question(query, resolve));
+
+    for (const match of matches) {
+      const [_, title, filePath, originalCode, suggestedCode] = match;
+      const fixedCode = suggestedCode.trim();
+
+      console.log(`\n--------------------------------------------------`);
+      console.log(`${YELLOW}Issue:${RESET} ${title}`);
+      console.log(`${YELLOW}File:${RESET} ${filePath}`);
+      if (originalCode) {
+        console.log(`${YELLOW}Original:${RESET}\n${originalCode.trim()}`);
+      }
+      console.log(`${GREEN}Suggested Fix:${RESET}\n${fixedCode}`);
+      console.log(`--------------------------------------------------`);
+
+      const answer = await askQuestion(`Apply this fix to ${filePath}? [y/N]: `);
+
+      if (answer.toLowerCase() === "y") {
+        try {
+          const absolutePath = path.resolve(gitRoot, filePath);
+          const fileContent = await fsp.readFile(absolutePath, "utf8");
+
+          let updatedContent;
+          if (originalCode) {
+            // Precise search-and-replace: swap original block with suggested fix
+            const original = originalCode.trim();
+            if (!fileContent.includes(original)) {
+              console.log(`\x1b[31mCould not locate original snippet in ${filePath}. Skipping.${RESET}`);
+              continue;
+            }
+            updatedContent = fileContent.replace(original, fixedCode);
+          } else {
+            // No original block provided — find the rule whose pattern matches this
+            // finding's title, then apply only that rule across the file's lines.
+            const INLINE_RULES = [
+              { title: /buffer/i,   pattern: /\bnew Buffer\s*\(/,   fix: (l) => l.replace(/\bnew Buffer\s*\(/, "Buffer.from(") },
+              { title: /url\.parse/i, pattern: /\burl\.parse\s*\(/, fix: (l) => l.replace(/\burl\.parse\s*\(/, "new URL(") },
+              { title: /fs\.exists/i, pattern: /\bfs\.exists\s*\(/, fix: (l) => l.replace(/\bfs\.exists\s*\(/, "fs.access(") },
+              { title: /substr/i,   pattern: /\.substr\s*\(/,       fix: (l) => l.replace(/\.substr\s*\(\s*([^,)]+)\s*,\s*([^)]+)\)/, ".slice($1, $1 + $2)") },
+              { title: /var/i,      pattern: /\bvar\s+/,            fix: (l) => l.replace(/\bvar\b/g, "const") },
+            ];
+            const rule = INLINE_RULES.find((r) => r.title.test(title));
+            if (!rule) {
+              console.log(`\x1b[31mNo rule matched finding "${title}". Skipping.${RESET}`);
+              continue;
+            }
+            const lines = fileContent.split("\n");
+            let changed = false;
+            const patched = lines.map((line) => {
+              if (rule.pattern.test(line)) {
+                changed = true;
+                return rule.fix(line);
+              }
+              return line;
+            });
+            if (!changed) {
+              console.log(`\x1b[31mPattern for "${title}" not found in ${filePath} — already fixed or not present. Skipping.${RESET}`);
+              continue;
+            }
+            updatedContent = patched.join("\n");
+          }
+
+          await fsp.writeFile(absolutePath, updatedContent, "utf8");
+          console.log(`${GREEN}✔ Fix applied to ${filePath}${RESET}`);
+        } catch (err) {
+          console.log(`\x1b[31mFailed to modify file: ${err.message}${RESET}`);
+        }
+      } else {
+        console.log(`Skipped.`);
+      }
+    }
+    rl.close();
+  }
 }
 
 const program = new Command();
