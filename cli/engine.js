@@ -700,6 +700,23 @@ function parseFindings(markdown, source) {
   return findings;
 }
 
+function buildAgentPrompt(finding) {
+  const file = finding.file || "n/a";
+  const title = finding.title || "Issue";
+  const description = finding.description || "No description provided.";
+  const recommendation = finding.recommendation || "Review this change before merging.";
+  const refactorClause = finding.refactor
+    ? ` Apply the following refactor:\n\`\`\`\n${finding.refactor}\n\`\`\``
+    : "";
+  return (
+    `Fix the following issue in \`${file}\`:\n\n` +
+    `**${title}**\n\n` +
+    `${description}\n\n` +
+    `Recommendation: ${recommendation}` +
+    refactorClause
+  );
+}
+
 function renderFinding(finding) {
   const lines = [
     `### ${finding.title}`,
@@ -712,6 +729,14 @@ function renderFinding(finding) {
   if (finding.refactor) {
     lines.push("- **Refactor:**", "```suggestion", finding.refactor, "```");
   }
+
+  const prompt = buildAgentPrompt(finding);
+  const encoded = encodeURIComponent(prompt);
+  lines.push(
+    "",
+    `> 🤖 **Fix with AI Agent:**`,
+    `> [Open in Cursor](cursor://anysphere.cursor-deeplink/composer?text=${encoded}) · [Open in VS Code](vscode://GitHub.copilot-chat/chat?prompt=${encoded})`,
+  );
 
   return lines.join("\n");
 }

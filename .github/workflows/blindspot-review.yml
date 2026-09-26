@@ -1,6 +1,9 @@
 name: Blindspot AI Code Reviewer
 
 on:
+  push:
+    branches:
+      - '**'
   pull_request:
     types: [opened, synchronize, reopened]
 
@@ -8,7 +11,7 @@ jobs:
   review:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       pull-requests: write
 
     steps:
@@ -25,7 +28,27 @@ jobs:
       - name: Install Dependencies
         run: npm ci
 
-      - name: Run Blindspot PR Review
+      - name: Run Blindspot Review (Push)
+        if: github.event_name == 'push'
+        env:
+          ENGINE_PROVIDER: 'bob'
+          BOB_API_KEY: ${{ secrets.BOB_API_KEY }}
+          BOB_LIVE_API: 'true'
+        run: |
+          BASE_SHA="${{ github.event.before }}"
+          HEAD_SHA="${{ github.sha }}"
+          # If this is the very first push (no parent), diff against empty tree
+          EMPTY_TREE=$(git hash-object -t tree /dev/null)
+          if [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            BASE_SHA="$EMPTY_TREE"
+          fi
+          git diff "$BASE_SHA" "$HEAD_SHA" > /tmp/blindspot.diff
+          # Stage the diff so cli/index.js collectGitDiff picks it up
+          git apply --cached /tmp/blindspot.diff || true
+          node cli/index.js --provider bob --export-logs
+
+      - name: Run Blindspot Review (Pull Request)
+        if: github.event_name == 'pull_request'
         env:
           ENGINE_PROVIDER: 'bob'
           BOB_API_KEY: ${{ secrets.BOB_API_KEY }}
@@ -36,9 +59,22 @@ jobs:
           git add -A
           node cli/index.js --provider bob --export-logs
 
+      - name: Commit Report to Branch
+        if: github.event_name == 'push'
+        run: |
+          git config user.name  "blindspot-bot"
+          git config user.email "blindspot-bot@users.noreply.github.com"
+          git add blindspot-report.md || true
+          if git diff --cached --quiet; then
+            echo "No changes to report — skipping commit."
+          else
+            git commit -m "chore: update blindspot-report.md [skip ci]"
+            git push
+          fi
+
       - name: Post PR Review Comment
         uses: marocchino/sticky-pull-request-comment@v2
-        if: always()
+        if: github.event_name == 'pull_request' && always()
         with:
           path: blindspot-report.md
           header: blindspot-architectural-review
