@@ -731,11 +731,24 @@ function renderFinding(finding) {
   }
 
   const prompt = buildAgentPrompt(finding);
-  const encoded = encodeURIComponent(prompt);
+  const encodedPrompt = encodeURIComponent(prompt);
+  // GitHub strips non-http(s) hrefs, so we route through the official
+  // vscode.dev/redirect gateway for VS Code (https → vscode://).
+  // For Cursor we embed the raw URI in a collapsible block so the user
+  // can copy-paste it into the browser address bar to open Composer.
+  const vscodeUri = `vscode://GitHub.copilot-chat/chat?prompt=${encodedPrompt}`;
+  const cursorUri = `cursor://anysphere.cursor-deeplink/composer?text=${encodedPrompt}`;
+  const vscodeLink = `https://vscode.dev/redirect?url=${encodeURIComponent(vscodeUri)}`;
   lines.push(
     "",
-    `> 🤖 **Fix with AI Agent:**`,
-    `> [Open in Cursor](cursor://anysphere.cursor-deeplink/composer?text=${encoded}) · [Open in VS Code](vscode://GitHub.copilot-chat/chat?prompt=${encoded})`,
+    `> 🤖 **Fix with AI Agent:** [Open in VS Code ↗](${vscodeLink})`,
+    `> <details><summary>Open in Cursor</summary>`,
+    `>`,
+    `> Copy this URI and paste it in your browser address bar:`,
+    `>`,
+    `> \`${cursorUri}\``,
+    `>`,
+    `> </details>`,
   );
 
   return lines.join("\n");
