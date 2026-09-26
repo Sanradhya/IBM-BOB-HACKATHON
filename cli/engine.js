@@ -732,23 +732,14 @@ function renderFinding(finding) {
 
   const prompt = buildAgentPrompt(finding);
   const encodedPrompt = encodeURIComponent(prompt);
-  // GitHub strips non-http(s) hrefs, so we route through the official
-  // vscode.dev/redirect gateway for VS Code (https → vscode://).
-  // For Cursor we embed the raw URI in a collapsible block so the user
-  // can copy-paste it into the browser address bar to open Composer.
-  const vscodeUri = `vscode://GitHub.copilot-chat/chat?prompt=${encodedPrompt}`;
-  const cursorUri = `cursor://anysphere.cursor-deeplink/composer?text=${encodedPrompt}`;
-  const vscodeLink = `https://vscode.dev/redirect?url=${encodeURIComponent(vscodeUri)}`;
+  // Native deeplinks — work as clickable links in any local .md file
+  // opened inside VS Code or Cursor. Click → opens AI chat pre-filled.
+  const cursorLink = `cursor://anysphere.cursor-deeplink/composer?text=${encodedPrompt}`;
+  const vscodeLink = `vscode://GitHub.copilot-chat/chat?prompt=${encodedPrompt}`;
   lines.push(
     "",
-    `> 🤖 **Fix with AI Agent:** [Open in VS Code ↗](${vscodeLink})`,
-    `> <details><summary>Open in Cursor</summary>`,
-    `>`,
-    `> Copy this URI and paste it in your browser address bar:`,
-    `>`,
-    `> \`${cursorUri}\``,
-    `>`,
-    `> </details>`,
+    `> 🤖 **Add to AI Agent:**`,
+    `> [➕ Add to Chat (Cursor)](${cursorLink}) · [➕ Add to Chat (VS Code)](${vscodeLink})`,
   );
 
   return lines.join("\n");
