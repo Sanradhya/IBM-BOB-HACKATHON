@@ -1,6 +1,9 @@
 name: Blindspot AI Code Reviewer
 
 on:
+  push:
+    branches:
+      - '**'
   pull_request:
     types: [opened, synchronize, reopened]
 
@@ -8,7 +11,7 @@ jobs:
   review:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       pull-requests: write
 
     steps:
@@ -25,17 +28,55 @@ jobs:
       - name: Install Dependencies
         run: npm ci
 
-      - name: Run Blindspot PR Review
+      - name: Run Blindspot Review (Push)
+        if: github.event_name == 'push'
         env:
           ENGINE_PROVIDER: 'bob'
           BOB_API_KEY: ${{ secrets.BOB_API_KEY }}
           BOB_LIVE_API: 'true'
         run: |
+          BASE_SHA="${{ github.event.before }}"
+          # If this is the very first push on the branch, diff against empty tree
+          if [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            BASE_SHA=$(git hash-object -t tree /dev/null)
+          fi
+          # Reset to base so every file changed since base becomes staged,
+          # then collectGitDiff in cli/index.js will pick them up correctly.
+          git reset "$BASE_SHA"
+          git add -A
           node cli/index.js --provider bob --export-logs
+
+      - name: Run Blindspot Review (Pull Request)
+        if: github.event_name == 'pull_request'
+        env:
+          ENGINE_PROVIDER: 'bob'
+          BOB_API_KEY: ${{ secrets.BOB_API_KEY }}
+          BOB_LIVE_API: 'true'
+        run: |
+          git fetch origin ${{ github.event.pull_request.base.ref }}
+          git reset origin/${{ github.event.pull_request.base.ref }}
+          git add -A
+          node cli/index.js --provider bob --export-logs
+
+      - name: Commit Report to Branch
+        if: github.event_name == 'push'
+        run: |
+          git config user.name  "blindspot-bot"
+          git config user.email "blindspot-bot@users.noreply.github.com"
+          # Force-track the report even if .gitignore previously excluded it
+          git add -f blindspot-report.md
+          if git diff --cached --quiet; then
+            echo "No changes to report — skipping commit."
+          else
+            git commit -m "chore: update blindspot-report.md [skip ci]"
+            # Pull & rebase any bot commits already on the remote, then push
+            git pull --rebase origin ${{ github.ref_name }}
+            git push origin HEAD:${{ github.ref_name }}
+          fi
 
       - name: Post PR Review Comment
         uses: marocchino/sticky-pull-request-comment@v2
-        if: always()
+        if: github.event_name == 'pull_request' && always()
         with:
           path: blindspot-report.md
           header: blindspot-architectural-review
