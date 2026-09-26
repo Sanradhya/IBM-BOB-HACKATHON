@@ -275,7 +275,8 @@ async function run(cliOptions = {}) {
 
   const reportPath = path.join(process.cwd(), REPORT_FILENAME);
   await fsp.writeFile(reportPath, markdown, "utf8");
-  await ensureGitignoreEntry(gitRoot, REPORT_FILENAME);
+  // Do NOT add blindspot-report.md to .gitignore — it needs to be tracked
+  // so the post-commit hook and GitHub Actions bot can commit it to the branch.
   await ensureGitignoreEntry(gitRoot, SESSION_LOG_FILENAME);
 
   if (exportLogs && telemetry != null) {

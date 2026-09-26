@@ -63,12 +63,15 @@ jobs:
         run: |
           git config user.name  "blindspot-bot"
           git config user.email "blindspot-bot@users.noreply.github.com"
-          git add blindspot-report.md || true
+          # Force-track the report even if .gitignore previously excluded it
+          git add -f blindspot-report.md
           if git diff --cached --quiet; then
             echo "No changes to report — skipping commit."
           else
             git commit -m "chore: update blindspot-report.md [skip ci]"
-            git push
+            # Pull & rebase any bot commits already on the remote, then push
+            git pull --rebase origin ${{ github.ref_name }}
+            git push origin HEAD:${{ github.ref_name }}
           fi
 
       - name: Post PR Review Comment
