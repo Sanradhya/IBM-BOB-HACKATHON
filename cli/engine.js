@@ -717,7 +717,7 @@ function buildAgentPrompt(finding) {
   );
 }
 
-function renderFinding(finding) {
+function renderFinding(finding, { includeAgentLinks = true } = {}) {
   const lines = [
     `### ${finding.title}`,
     `- **File:** \`${finding.file || "n/a"}\``,
@@ -730,22 +730,26 @@ function renderFinding(finding) {
     lines.push("- **Refactor:**", "```suggestion", finding.refactor, "```");
   }
 
-  const prompt = buildAgentPrompt(finding);
-  const encodedPrompt = encodeURIComponent(prompt);
-  // Native deeplinks — work as clickable links in any local .md file
-  // opened inside VS Code or Cursor. Click → opens AI chat pre-filled.
-  const cursorLink = `cursor://anysphere.cursor-deeplink/composer?text=${encodedPrompt}`;
-  const vscodeLink = `vscode://GitHub.copilot-chat/chat?prompt=${encodedPrompt}`;
-  lines.push(
-    "",
-    `> 🤖 **Add to AI Agent:**`,
-    `> [➕ Add to Chat (Cursor)](${cursorLink}) · [➕ Add to Chat (VS Code)](${vscodeLink})`,
-  );
+  if (includeAgentLinks) {
+    const prompt = buildAgentPrompt(finding);
+    const encodedPrompt = encodeURIComponent(prompt);
+    // Native deeplinks — clickable in any local .md file opened in VS Code or Cursor.
+    const cursorLink = `cursor://anysphere.cursor-deeplink/composer?text=${encodedPrompt}`;
+    const vscodeLink = `vscode://GitHub.copilot-chat/chat?prompt=${encodedPrompt}`;
+    lines.push(
+      "",
+      `> 🤖 **Add to AI Agent:**`,
+      `> [➕ Add to Chat (Cursor)](${cursorLink}) · [➕ Add to Chat (VS Code)](${vscodeLink})`,
+    );
+  }
 
   return lines.join("\n");
 }
 
 function formatConsolidatedReport(findings) {
+  // GitHub Actions sets CI=true — omit IDE-only deeplinks from the PR comment.
+  const includeAgentLinks = !isTruthyEnv(process.env.CI);
+
   const deduped = dedupeFindings(findings);
   const buckets = {
     Critical: [],
@@ -770,7 +774,7 @@ function formatConsolidatedReport(findings) {
   const sections = SEVERITY_LEVELS.map((level) => {
     const items = buckets[level];
     const body = items.length
-      ? items.map((finding) => renderFinding(finding)).join("\n\n")
+      ? items.map((finding) => renderFinding(finding, { includeAgentLinks })).join("\n\n")
       : "_None._";
     return `## ${level}\n${body}`;
   });

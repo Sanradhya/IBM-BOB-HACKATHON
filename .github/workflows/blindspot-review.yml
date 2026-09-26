@@ -36,15 +36,14 @@ jobs:
           BOB_LIVE_API: 'true'
         run: |
           BASE_SHA="${{ github.event.before }}"
-          HEAD_SHA="${{ github.sha }}"
-          # If this is the very first push (no parent), diff against empty tree
-          EMPTY_TREE=$(git hash-object -t tree /dev/null)
+          # If this is the very first push on the branch, diff against empty tree
           if [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
-            BASE_SHA="$EMPTY_TREE"
+            BASE_SHA=$(git hash-object -t tree /dev/null)
           fi
-          git diff "$BASE_SHA" "$HEAD_SHA" > /tmp/blindspot.diff
-          # Stage the diff so cli/index.js collectGitDiff picks it up
-          git apply --cached /tmp/blindspot.diff || true
+          # Reset to base so every file changed since base becomes staged,
+          # then collectGitDiff in cli/index.js will pick them up correctly.
+          git reset "$BASE_SHA"
+          git add -A
           node cli/index.js --provider bob --export-logs
 
       - name: Run Blindspot Review (Pull Request)
