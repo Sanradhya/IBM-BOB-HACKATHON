@@ -1,0 +1,112 @@
+{
+  "reviewSessionId": "3de79293-5742-4d6b-8e33-4c4755113f70",
+  "sessionIds": [
+    "bob-security-6453a5c7-6db6-48e0-82b6-64f1772a25b7",
+    "bob-architecture-603b88f3-229e-4cba-a9d3-078990249b51",
+    "bob-legacy-6fc21c61-e711-4627-8b7f-ddd6a12f1867",
+    "bob-manager-83ec7b64-17cf-4e0e-b15d-b611c08423dd"
+  ],
+  "tokenUsage": {
+    "promptTokens": 1823,
+    "completionTokens": 225,
+    "totalTokens": 2048,
+    "estimated": true
+  },
+  "sessions": {
+    "bob-security-6453a5c7-6db6-48e0-82b6-64f1772a25b7": {
+      "role": "security",
+      "tokenUsage": {
+        "promptTokens": 527,
+        "completionTokens": 53,
+        "totalTokens": 580,
+        "estimated": true
+      },
+      "durationMs": 67,
+      "mode": "stub",
+      "status": "ok",
+      "toolCallCount": 0
+    },
+    "bob-architecture-603b88f3-229e-4cba-a9d3-078990249b51": {
+      "role": "architecture",
+      "tokenUsage": {
+        "promptTokens": 494,
+        "completionTokens": 62,
+        "totalTokens": 556,
+        "estimated": true
+      },
+      "durationMs": 53,
+      "mode": "stub",
+      "status": "ok",
+      "toolCallCount": 1
+    },
+    "bob-legacy-6fc21c61-e711-4627-8b7f-ddd6a12f1867": {
+      "role": "legacy",
+      "tokenUsage": {
+        "promptTokens": 400,
+        "completionTokens": 54,
+        "totalTokens": 454,
+        "estimated": true
+      },
+      "durationMs": 52,
+      "mode": "stub",
+      "status": "ok",
+      "toolCallCount": 1
+    },
+    "bob-manager-83ec7b64-17cf-4e0e-b15d-b611c08423dd": {
+      "role": "manager",
+      "tokenUsage": {
+        "promptTokens": 402,
+        "completionTokens": 56,
+        "totalTokens": 458,
+        "estimated": true
+      },
+      "durationMs": 4,
+      "mode": "stub",
+      "status": "ok",
+      "toolCallCount": 0
+    }
+  },
+  "execution": {
+    "parallelSubagents": [
+      "security",
+      "architecture",
+      "legacy"
+    ],
+    "manager": "manager",
+    "durationMs": 80,
+    "agents": [
+      {
+        "sessionId": "bob-security-6453a5c7-6db6-48e0-82b6-64f1772a25b7",
+        "role": "security",
+        "durationMs": 67,
+        "mode": "stub",
+        "status": "ok",
+        "toolCallCount": 0
+      },
+      {
+        "sessionId": "bob-architecture-603b88f3-229e-4cba-a9d3-078990249b51",
+        "role": "architecture",
+        "durationMs": 53,
+        "mode": "stub",
+        "status": "ok",
+        "toolCallCount": 1
+      },
+      {
+        "sessionId": "bob-legacy-6fc21c61-e711-4627-8b7f-ddd6a12f1867",
+        "role": "legacy",
+        "durationMs": 52,
+        "mode": "stub",
+        "status": "ok",
+        "toolCallCount": 1
+      },
+      {
+        "sessionId": "bob-manager-83ec7b64-17cf-4e0e-b15d-b611c08423dd",
+        "role": "manager",
+        "durationMs": 4,
+        "mode": "stub",
+        "status": "ok",
+        "toolCallCount": 0
+      }
+    ]
+  }
+}
