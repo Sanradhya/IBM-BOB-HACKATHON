@@ -12,11 +12,17 @@
     "eval": "node evals/run.mjs"
   },
   "dependencies": {
+    "axios": "latest",
     "cli-progress": "^3.12.0",
     "commander": "^15.0.0",
     "dotenv": "^18.0.3",
+    "lodash-utils": "^4.17.21",
     "node-llama-cpp": "^3.19.0",
     "pdf-parse": "^1.1.1",
     "simple-git": "^3.36.0"
+  },
+  "devDependencies": {
+    "@types/node": "20.17.6",
+    "typescript": "5.8.2"
   }
 }

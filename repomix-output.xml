@@ -43,6 +43,10 @@ The content is organized as follows:
 .github/
   workflows/
     blindspot-review.yml
+app/
+  api/
+    system/
+      route.js
 bob_sessions/
   .gitkeep
 cli/
@@ -50,11 +54,21 @@ cli/
   index.js
 evals/
   run.mjs
+lib/
+  auth.js
+  dataProcessor.js
+  faulty-demo.js
+  fileHandler.js
+  legacy-parser.js
+  utils.js
+test-app/
+  package.json
 .blindspot-data.json
 .cursorrules
 .env.example
 .gitignore
 ARCHITECTURE.md
+blindspot-report.md
 package.json
 README.md
 tsconfig.json
@@ -63,52 +77,790 @@ tsconfig.json
 <files>
 This section contains the contents of the repository's files.
 
-<file path=".github/workflows/blindspot-review.yml">
-name: Blindspot AI Code Reviewer
+<file path="app/api/system/route.js">
+import { execSync } from "child_process";
 
-on:
-  pull_request:
-    types: [opened, synchronize, reopened]
-
-jobs:
-  review:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install Dependencies
-        run: npm ci
-
-      - name: Run Blindspot PR Review
-        env:
-          ENGINE_PROVIDER: 'bob'
-          BOB_API_KEY: ${{ secrets.BOB_API_KEY }}
-          BOB_LIVE_API: 'true'
-        run: |
-          node cli/index.js --provider bob --export-logs
-
-      - name: Post PR Review Comment
-        uses: marocchino/sticky-pull-request-comment@v2
-        if: always()
-        with:
-          path: blindspot-report.md
-          header: blindspot-architectural-review
+// VIOLATION: Exporting a POST route without any auth middleware
+export async function POST(request) {
+  const data = await request.json();
+  
+  // VIOLATION: Unhandled side effect executing raw user input
+  const result = execSync(`ping -c 4 ${data.ipAddress}`);
+  
+  return new Response(result.toString(), { status: 200 });
+}
 </file>
 
 <file path="bob_sessions/.gitkeep">
 
+</file>
+
+<file path="evals/run.mjs">
+import { promises as fs } from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PROJECT_ROOT = path.resolve(__dirname, "..");
+const MOCK_REPO_DIR = path.join(PROJECT_ROOT, "evals", "mock-repo");
+const BLINDSPOT_DATA_PATH = path.join(PROJECT_ROOT, ".blindspot-data.json");
+const REVIEW_URL = "http://localhost:3000/api/review";
+
+const JSON_FALLBACK_REGEX = /\{[\s\S]*\}/;
+
+const SCENARIOS = [
+  {
+    name: "Middleware Bypass",
+    description:
+      "New dashboard settings route queries sensitive data, but middleware only protects /admin",
+    files: {
+      "middleware.ts": `import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
+
+export function middleware(request: NextRequest) {
+  const token = request.cookies.get("auth-token");
+
+  if (!token) {
+    return NextResponse.redirect(new URL("/login", request.url));
+  }
+
+  return NextResponse.next();
+}
+
+export const config = {
+  matcher: ["/admin/:path*"],
+};
+`,
+    },
+    diff: `diff --git a/app/dashboard/settings/page.tsx b/app/dashboard/settings/page.tsx
+new file mode 100644
+index 0000000..a1b2c3d
+--- /dev/null
++++ b/app/dashboard/settings/page.tsx
+@@ -0,0 +1,18 @@
++"use client";
++
++import { useEffect, useState } from "react";
++
++export default function SettingsPage() {
++  const [secrets, setSecrets] = useState<Record<string, string>>({});
++
++  useEffect(() => {
++    fetch("/api/internal/admin-secrets")
++      .then((res) => res.json())
++      .then(setSecrets);
++  }, []);
++
++  return (
++    <main>
++      <h1>Account Settings</h1>
++      <pre>{JSON.stringify(secrets, null, 2)}</pre>
++    </main>
++  );
++}
+`,
+  },
+  {
+    name: "Supply Chain Poisoning",
+    description:
+      'Dependency swap from "lodash" to suspicious typosquat "lodash-utils"',
+    files: {
+      "package.json": JSON.stringify(
+        {
+          name: "acme-dashboard",
+          version: "1.0.0",
+          private: true,
+          dependencies: {
+            "lodash-utils": "^4.17.21",
+            react: "^19.0.0",
+            "next": "^15.0.0",
+          },
+        },
+        null,
+        2,
+      ),
+    },
+    diff: `diff --git a/package.json b/package.json
+index 1234567..89abcdef 100644
+--- a/package.json
++++ b/package.json
+@@ -4,7 +4,7 @@
+   "version": "1.0.0",
+   "private": true,
+   "dependencies": {
+-    "lodash": "^4.17.21",
++    "lodash-utils": "^4.17.21",
+     "react": "^19.0.0",
+     "next": "^15.0.0"
+   }
+`,
+  },
+];
+
+function parseAnalysisPayload(analysis) {
+  if (!analysis) {
+    return null;
+  }
+
+  if (typeof analysis === "object") {
+    return analysis;
+  }
+
+  const trimmed = analysis.trim();
+  const jsonMatch = trimmed.match(JSON_FALLBACK_REGEX);
+
+  if (!jsonMatch) {
+    return { analysis: trimmed };
+  }
+
+  try {
+    return JSON.parse(jsonMatch[0]);
+  } catch {
+    return { analysis: trimmed };
+  }
+}
+
+function normalizeIssues(analysis) {
+  const issues = analysis.issues ?? analysis.findings;
+
+  if (!Array.isArray(issues)) {
+    return [];
+  }
+
+  return issues.filter(
+    (issue) =>
+      typeof issue === "object" &&
+      issue !== null &&
+      typeof issue.title === "string",
+  );
+}
+
+function riskColor(riskLevel) {
+  const normalized = (riskLevel ?? "").toLowerCase();
+
+  if (normalized === "high" || normalized === "critical") {
+    return "\x1b[31m";
+  }
+
+  if (normalized === "medium") {
+    return "\x1b[33m";
+  }
+
+  if (normalized === "low") {
+    return "\x1b[34m";
+  }
+
+  return "\x1b[32m";
+}
+
+function severityColor(severity) {
+  return riskColor(severity);
+}
+
+const RESET = "\x1b[0m";
+const DIM = "\x1b[2m";
+const BOLD = "\x1b[1m";
+const CYAN = "\x1b[36m";
+
+function printDivider(char = "─", width = 72) {
+  console.log(DIM + char.repeat(width) + RESET);
+}
+
+function printScenarioHeader(index, scenario) {
+  console.log();
+  printDivider("═");
+  console.log(
+    `${BOLD}${CYAN}Scenario ${index + 1}: ${scenario.name}${RESET}`,
+  );
+  console.log(`${DIM}${scenario.description}${RESET}`);
+  printDivider("═");
+}
+
+function printFindings(scenario, parsed) {
+  const issues = normalizeIssues(parsed);
+  const riskLevel = parsed.riskLevel ?? "Unknown";
+  const summary = parsed.summary ?? parsed.analysis ?? "(no summary provided)";
+
+  console.log();
+  console.log(`${BOLD}Summary${RESET}`);
+  printDivider();
+  console.log(summary);
+
+  console.log();
+  console.log(
+    `${BOLD}Risk Level${RESET}  ${riskColor(riskLevel)}${riskLevel}${RESET}`,
+  );
+
+  console.log();
+  console.log(`${BOLD}Issues${RESET} (${issues.length})`);
+  printDivider();
+
+  if (issues.length === 0) {
+    console.log(`${DIM}  No structured issues returned.${RESET}`);
+    return;
+  }
+
+  for (const [issueIndex, issue] of issues.entries()) {
+    const severity = issue.severity ?? "unknown";
+    console.log();
+    console.log(
+      `  ${BOLD}${issueIndex + 1}. ${issue.title}${RESET}  ${severityColor(severity)}[${severity}]${RESET}`,
+    );
+
+    if (issue.file) {
+      console.log(`     ${DIM}File:${RESET} ${issue.file}`);
+    }
+
+    if (issue.description) {
+      console.log(`     ${DIM}Description:${RESET} ${issue.description}`);
+    }
+
+    if (issue.recommendation) {
+      console.log(`     ${DIM}Fix:${RESET} ${issue.recommendation}`);
+    }
+  }
+}
+
+async function writeScenarioFiles(files) {
+  await fs.mkdir(MOCK_REPO_DIR, { recursive: true });
+
+  for (const [relativePath, content] of Object.entries(files)) {
+    const absolutePath = path.join(MOCK_REPO_DIR, relativePath);
+    await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+    await fs.writeFile(absolutePath, content, "utf8");
+  }
+}
+
+async function updateBlindspotData(diff, repoPath) {
+  const payload = {
+    diff,
+    repositoryRoot: repoPath,
+    repoPath,
+    savedAt: new Date().toISOString(),
+  };
+
+  await fs.writeFile(
+    BLINDSPOT_DATA_PATH,
+    `${JSON.stringify(payload, null, 2)}\n`,
+    "utf8",
+  );
+}
+
+async function cleanupMockRepo() {
+  await fs.rm(MOCK_REPO_DIR, { recursive: true, force: true });
+}
+
+async function runScenario(index, scenario) {
+  const repoPath = path.resolve(MOCK_REPO_DIR);
+
+  printScenarioHeader(index, scenario);
+
+  try {
+    await writeScenarioFiles(scenario.files);
+    await updateBlindspotData(scenario.diff, repoPath);
+
+    console.log();
+    console.log(`${DIM}Mock repo:${RESET} ${repoPath}`);
+    console.log(`${DIM}POST${RESET}       ${REVIEW_URL}`);
+
+    const response = await fetch(REVIEW_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        diff: scenario.diff,
+        repoPath,
+      }),
+    });
+
+    const payload = await response.json();
+
+    if (!response.ok) {
+      console.error(
+        `\n\x1b[31mAPI error (${response.status}):${RESET} ${payload.error ?? "Unknown error"}`,
+      );
+      return { scenario: scenario.name, ok: false, error: payload.error };
+    }
+
+    const parsed = parseAnalysisPayload(payload.analysis);
+
+    if (!parsed) {
+      console.error("\n\x1b[31mCould not parse analysis from API response.\x1b[0m");
+      return { scenario: scenario.name, ok: false, error: "Unparseable analysis" };
+    }
+
+    printFindings(scenario, parsed);
+    return { scenario: scenario.name, ok: true, riskLevel: parsed.riskLevel };
+  } finally {
+    await cleanupMockRepo();
+  }
+}
+
+async function loadOriginalBlindspotData() {
+  try {
+    const raw = await fs.readFile(BLINDSPOT_DATA_PATH, "utf8");
+    return { existed: true, content: raw };
+  } catch {
+    return { existed: false, content: null };
+  }
+}
+
+async function restoreBlindspotData(original) {
+  if (original.existed) {
+    await fs.writeFile(BLINDSPOT_DATA_PATH, original.content, "utf8");
+    return;
+  }
+
+  await fs.rm(BLINDSPOT_DATA_PATH, { force: true });
+}
+
+async function main() {
+  console.log(`${BOLD}Blindspot Agentic ReAct Evaluation Suite${RESET}`);
+  console.log(`${DIM}Project root: ${PROJECT_ROOT}${RESET}`);
+
+  const originalData = await loadOriginalBlindspotData();
+  const results = [];
+
+  try {
+    for (const [index, scenario] of SCENARIOS.entries()) {
+      results.push(await runScenario(index, scenario));
+    }
+  } finally {
+    await restoreBlindspotData(originalData);
+  }
+
+  console.log();
+  printDivider("═");
+  console.log(`${BOLD}Evaluation Summary${RESET}`);
+  printDivider("═");
+
+  for (const result of results) {
+    const status = result.ok
+      ? `\x1b[32mPASS\x1b[0m`
+      : `\x1b[31mFAIL\x1b[0m`;
+    const detail = result.ok
+      ? `(risk: ${result.riskLevel ?? "unknown"})`
+      : `(${result.error})`;
+    console.log(`  ${status}  ${result.scenario}  ${DIM}${detail}${RESET}`);
+  }
+
+  console.log();
+
+  const failed = results.filter((result) => !result.ok).length;
+
+  if (failed > 0) {
+    process.exitCode = 1;
+  }
+}
+
+main().catch((error) => {
+  console.error("\n\x1b[31mEval runner crashed:\x1b[0m", error);
+  process.exitCode = 1;
+});
+</file>
+
+<file path="lib/auth.js">
+// Authentication helpers
+const crypto = require("crypto");
+
+// BUG 1: MD5 is cryptographically broken — should never be used for passwords
+function hashPassword(password) {
+  return crypto.createHash("md5").update(password).digest("hex");
+}
+
+// BUG 2: Timing-safe comparison skipped — vulnerable to timing attacks
+function verifyToken(inputToken, storedToken) {
+  return inputToken === storedToken;
+}
+
+// BUG 3: Hardcoded secret — never commit secrets in source code
+const JWT_SECRET = "super_secret_key_12345";
+
+// BUG 4: eval() on user input — remote code execution risk
+function parseConfig(configStr) {
+  return eval(configStr);
+}
+
+// BUG 5: Unbounded recursion — no base-case guard, will stack-overflow on deep input
+function deepClone(obj) {
+  if (typeof obj !== "object") return obj;
+  const clone = {};
+  for (const key of Object.keys(obj)) {
+    clone[key] = deepClone(obj[key]);
+  }
+  return clone;
+}
+
+module.exports = { hashPassword, verifyToken, JWT_SECRET, parseConfig, deepClone };
+</file>
+
+<file path="lib/dataProcessor.js">
+// Data processing utilities
+
+// BUG 1: Off-by-one error — loop goes one past the array end
+function sumArray(arr) {
+  let total = 0;
+  for (let i = 0; i <= arr.length; i++) {
+    total += arr[i]; // arr[arr.length] is undefined → NaN
+  }
+  return total;
+}
+
+// BUG 2: Mutating the input array instead of a copy — unexpected side effects
+function removeDuplicates(items) {
+  for (let i = 0; i < items.length; i++) {
+    for (let j = i + 1; j < items.length; j++) {
+      if (items[i] === items[j]) {
+        items.splice(j, 1); // mutates caller's array
+        j--;
+      }
+    }
+  }
+  return items;
+}
+
+// BUG 3: Integer division discards remainder — silent precision loss
+function average(nums) {
+  return (nums.reduce((a, b) => a + b, 0) / nums.length) | 0; // bitwise OR truncates
+}
+
+// BUG 4: Swallowed error — exception silently returns null, hiding failures
+async function fetchData(url) {
+  try {
+    const res = await fetch(url);
+    return await res.json();
+  } catch (e) {
+    return null; // caller never knows the request failed
+  }
+}
+
+// BUG 5: SQL injection via string concatenation — should use parameterised queries
+function buildQuery(tableName, userId) {
+  return `SELECT * FROM ${tableName} WHERE id = ` + userId;
+}
+
+module.exports = { sumArray, removeDuplicates, average, fetchData, buildQuery };
+</file>
+
+<file path="lib/faulty-demo.js">
+// ⚠️  DEMO FILE — intentionally contains security and code-quality issues
+// for testing the Blindspot auto-report pipeline.
+// Updated: adding more flaws to trigger a fresh scan on this commit.
+
+const http = require("http");
+const fs = require("fs");
+const url = require("url");
+const crypto = require("crypto");
+
+// 🔴 Hardcoded credentials
+const DB_PASSWORD = "supersecret123";
+const API_KEY = "sk-live-abcdef1234567890";
+const JWT_SECRET = "my_jwt_secret";
+
+// 🔴 Deprecated Buffer constructor
+function encodeData(input) {
+  return new Buffer(input).toString("base64");
+}
+
+// 🔴 Deprecated url.parse (should be new URL())
+function parseEndpoint(rawUrl) {
+  const parsed = url.parse(rawUrl);
+  return parsed.pathname;
+}
+
+// 🔴 SQL injection via string concatenation
+function buildQuery(userId) {
+  return "SELECT * FROM users WHERE id = " + userId;
+}
+
+// 🔴 Synchronous fs.readFileSync inside a request handler (blocks event loop)
+function handleRequest(req, res) {
+  const body = fs.readFileSync("./data/config.json", "utf8");
+  res.end(body);
+}
+
+// 🔴 MD5 used for password hashing (cryptographically broken)
+function hashPassword(password) {
+  return crypto.createHash("md5").update(password).digest("hex");
+}
+
+// 🔴 eval() on user-supplied input
+function runUserScript(userCode) {
+  return eval(userCode);
+}
+
+// 🔴 var instead of const/let
+var globalCounter = 0;
+
+function increment() {
+  var count = globalCounter;
+  count++;
+  globalCounter = count;
+  return globalCounter;
+}
+
+// 🔴 fs.exists (deprecated)
+function checkFile(filePath, cb) {
+  fs.exists(filePath, cb);
+}
+
+// 🔴 Unhandled promise rejection
+async function fetchData(endpoint) {
+  const response = await fetch(endpoint);
+  const json = response.json(); // missing await
+  return json;
+}
+
+module.exports = {
+  encodeData,
+  parseEndpoint,
+  buildQuery,
+  handleRequest,
+  hashPassword,
+  runUserScript,
+  increment,
+  checkFile,
+  fetchData,
+};
+</file>
+
+<file path="lib/fileHandler.js">
+// File handling utilities
+const fs = require("fs");
+const path = require("path");
+
+// BUG 1: Path traversal — user-supplied filename not sanitised
+function readUserFile(baseDir, filename) {
+  const filePath = path.join(baseDir, filename); // "../../../etc/passwd" works!
+  return fs.readFileSync(filePath, "utf8");
+}
+
+// BUG 2: Synchronous fs call inside an async function — blocks the event loop
+async function countLines(filePath) {
+  const content = fs.readFileSync(filePath, "utf8"); // should be await fsp.readFile
+  return content.split("\n").length;
+}
+
+// BUG 3: Race condition — TOCTOU (check-then-act) on file existence
+function safeWrite(filePath, data) {
+  if (fs.existsSync(filePath)) {
+    throw new Error("File already exists");
+  }
+  // Another process could create the file between the check and write ↓
+  fs.writeFileSync(filePath, data);
+}
+
+// BUG 4: Missing encoding in readFile — returns Buffer, caller expects string
+function loadConfig(configPath) {
+  return fs.readFileSync(configPath); // missing "utf8" second arg
+}
+
+// BUG 5: Recursive delete without a root-path guard — rm -rf style footgun
+function deleteDir(dirPath) {
+  if (fs.existsSync(dirPath)) {
+    fs.readdirSync(dirPath).forEach((file) => {
+      const curPath = path.join(dirPath, file);
+      if (fs.lstatSync(curPath).isDirectory()) {
+        deleteDir(curPath); // no guard against deleting "/" or "C:\\"
+      } else {
+        fs.unlinkSync(curPath);
+      }
+    });
+    fs.rmdirSync(dirPath);
+  }
+}
+
+module.exports = { readUserFile, countLines, safeWrite, loadConfig, deleteDir };
+</file>
+
+<file path="lib/legacy-parser.js">
+
+</file>
+
+<file path="test-app/package.json">
+{
+  "name": "test-app",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "lodash-utils": "^4.17.21"
+  }
+}
+</file>
+
+<file path=".blindspot-data.json">
+{
+  "diff": "",
+  "repositoryRoot": "C:\\Users\\STEORA SYSTEMS\\OneDrive\\Documents\\own\\blindspot",
+  "repoPath": "C:\\Users\\STEORA SYSTEMS\\OneDrive\\Documents\\own\\blindspot",
+  "savedAt": "2026-07-06T17:41:26.335Z"
+}
+</file>
+
+<file path=".cursorrules">
+# Project: Blindspot - Local AI Code Reviewer
+We are building a hybrid local developer tool consisting of a Node CLI and a Next.js App Router dashboard.
+
+**Tech Stack:**
+- **Framework:** Next.js 15 (App Router) + React 19
+- **UI:** Tailwind CSS, shadcn/ui, Lucide Icons
+- **CLI:** Node.js, `commander`, `simple-git`, `cli-progress`
+- **AI/Inference:** `node-llama-cpp` (for native, zero-config SLM execution).
+
+**Core Rules:**
+1. NO cloud AI dependencies (No OpenAI, No Anthropic). All inference runs locally.
+2. Use `node-llama-cpp` natively in Next.js API routes. Utilize its `LlamaChatSession` and built-in function-calling capabilities to create the agentic loop.
+3. The Next.js API must load the local GGUF model and expose tools (like file reading) directly to the `node-llama-cpp` session.
+</file>
+
+<file path=".env.example">
+# IBM Bob 2.0 (default review provider)
+BOB_API_KEY=
+BOB_LIVE_API=true
+# BOB_TEAM_ID=
+# BOB_API_URL=https://bob.ibm.com/login?callback_uri=http://127.0.0.1:60630/bob-callback&state=ded189cf-d6eb-4335-966b-1184a64cfd4e
+# BOB_MODEL=bob-2.0
+
+# Provider selection: bob | llama
+# ENGINE_PROVIDER=bob
+</file>
+
+<file path="ARCHITECTURE.md">
+# Blindspot Architecture & Security Rules
+
+These rules are mandatory for Subagent B (Architecture & PDF/Markdown Compliance). Every review of routes, manifests, handlers, and language usage must enforce them. A finding is required whenever a change violates a rule below.
+
+## Rule 1 — Authentication & Access Control
+
+All API routes under `/api/` or `/dashboard/` must enforce authentication middleware.
+
+- Every route handler, page, and layout reachable at `/api/*` or `/dashboard/*` must pass through an authentication check before reading data, mutating state, or returning a response.
+- Unprotected endpoint exports are strictly forbidden. A handler that is exported without an auth guard, or that is excluded from the matcher that applies that guard, is a violation.
+- Middleware bypasses are strictly forbidden. Narrowing a matcher so that `/api/` or `/dashboard/` paths skip authentication, short-circuiting with an early `next()` before the auth check, or commenting out the guard is a violation.
+- Session, cookie, or token validation must fail closed: missing or invalid credentials deny the request.
+
+## Rule 2 — Supply Chain & Dependencies
+
+Floating version specifiers and unvetted third-party npm utilities are strictly prohibited in production manifests (`package.json` and equivalent lock-producing manifests used for production installs).
+
+- Version ranges that float with `*`, `latest`, or a leading `^` are prohibited. Production dependencies must be pinned to an exact, reviewed version.
+- Unvetted third-party npm utilities are prohibited. This includes typosquatted helper libraries, packages with no established maintainer history, and one-off utilities added without a recorded review of name, publisher, and purpose.
+- A new production dependency is acceptable only when its name, version, and necessity are explicit and match a known, vetted package.
+
+## Rule 3 — Execution & Side Effects
+
+Dynamic code execution is forbidden in HTTP handlers without explicit validation.
+
+- `eval`, `child_process.exec`, and `vm.runInContext` must not appear in request handlers, route modules, or code those handlers call on the request path, unless the invocation is preceded by explicit validation of every input that can influence the executed string, command, or context.
+- Validation must be allowlist-based and must reject the request before execution when input does not match the allowlist.
+- Passing request bodies, query strings, headers, or file paths into these APIs without that validation is a violation.
+
+## Rule 4 — Modernization
+
+Legacy ES5 declarations must be modernized to ES2024+ standards.
+
+- `var` must be replaced with `const` or `let`.
+- `new Buffer()` must be replaced with `Buffer.from()`, `Buffer.alloc()`, or `Buffer.allocUnsafe()` as appropriate.
+- `url.parse` must be replaced with the WHATWG `URL` / `URLSearchParams` APIs.
+- New code introduced in a change must already meet this standard. A diff that adds any of the legacy forms above is a violation.
+</file>
+
+<file path="blindspot-report.md">
+## Summary
+Consolidated review from Security & Supply Chain, Architecture & Auth, and Legacy Modernization.
+No issues were reported by the subagents.
+
+## Critical
+_None._
+
+## High
+_None._
+
+## Medium
+_None._
+
+## Low
+_None._
+</file>
+
+<file path="lib/utils.js">
+const url = require("url");
+const fs = require("fs");
+
+function parseMyUrl(reqUrl) {
+  const myBuffer = Buffer.from(reqUrl);
+  const parsed = new URL(reqUrl);
+  
+  if (fs.access(parsed.pathname)) {
+    return true;
+  }
+  return false;
+}
+</file>
+
+<file path="tsconfig.json">
+{
+  "compilerOptions": {
+    "target": "ES2017",
+    "lib": ["esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "node",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "incremental": true
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules", ".next"]
+}
+</file>
+
+<file path=".gitignore">
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files
+.env
+.env*.local
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+
+bob-session-logs.json
+blindspot-diff-viewer.html
 </file>
 
 <file path="cli/engine.js">
@@ -814,7 +1566,24 @@ function parseFindings(markdown, source) {
   return findings;
 }
 
-function renderFinding(finding) {
+function buildAgentPrompt(finding) {
+  const file = finding.file || "n/a";
+  const title = finding.title || "Issue";
+  const description = finding.description || "No description provided.";
+  const recommendation = finding.recommendation || "Review this change before merging.";
+  const refactorClause = finding.refactor
+    ? ` Apply the following refactor:\n\`\`\`\n${finding.refactor}\n\`\`\``
+    : "";
+  return (
+    `Fix the following issue in \`${file}\`:\n\n` +
+    `**${title}**\n\n` +
+    `${description}\n\n` +
+    `Recommendation: ${recommendation}` +
+    refactorClause
+  );
+}
+
+function renderFinding(finding, { includeAgentLinks = true } = {}) {
   const lines = [
     `### ${finding.title}`,
     `- **File:** \`${finding.file || "n/a"}\``,
@@ -827,10 +1596,26 @@ function renderFinding(finding) {
     lines.push("- **Refactor:**", "```suggestion", finding.refactor, "```");
   }
 
+  if (includeAgentLinks) {
+    const prompt = buildAgentPrompt(finding);
+    const encodedPrompt = encodeURIComponent(prompt);
+    // Native deeplinks — clickable in any local .md file opened in VS Code or Cursor.
+    const cursorLink = `cursor://anysphere.cursor-deeplink/composer?text=${encodedPrompt}`;
+    const vscodeLink = `vscode://GitHub.copilot-chat/chat?prompt=${encodedPrompt}`;
+    lines.push(
+      "",
+      `> 🤖 **Add to AI Agent:**`,
+      `> [➕ Add to Chat (Cursor)](${cursorLink}) · [➕ Add to Chat (VS Code)](${vscodeLink})`,
+    );
+  }
+
   return lines.join("\n");
 }
 
 function formatConsolidatedReport(findings) {
+  // GitHub Actions sets CI=true — omit IDE-only deeplinks from the PR comment.
+  const includeAgentLinks = !isTruthyEnv(process.env.CI);
+
   const deduped = dedupeFindings(findings);
   const buckets = {
     Critical: [],
@@ -855,7 +1640,7 @@ function formatConsolidatedReport(findings) {
   const sections = SEVERITY_LEVELS.map((level) => {
     const items = buckets[level];
     const body = items.length
-      ? items.map((finding) => renderFinding(finding)).join("\n\n")
+      ? items.map((finding) => renderFinding(finding, { includeAgentLinks })).join("\n\n")
       : "_None._";
     return `## ${level}\n${body}`;
   });
@@ -1866,6 +2651,116 @@ module.exports = {
 };
 </file>
 
+<file path=".github/workflows/blindspot-review.yml">
+name: Blindspot AI Code Reviewer
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run Blindspot Review (Push)
+        if: github.event_name == 'push'
+        env:
+          ENGINE_PROVIDER: 'bob'
+          BOB_API_KEY: ${{ secrets.BOB_API_KEY }}
+          BOB_LIVE_API: 'true'
+        run: |
+          # Diff everything on this branch since it diverged from main —
+          # so the agents always see the full branch context, not just one commit.
+          BASE_SHA=$(git merge-base HEAD origin/main 2>/dev/null || git rev-parse HEAD~1)
+          git reset "$BASE_SHA"
+          git add -A
+          node cli/index.js --provider bob --export-logs
+
+      - name: Run Blindspot Review (Pull Request)
+        if: github.event_name == 'pull_request'
+        env:
+          ENGINE_PROVIDER: 'bob'
+          BOB_API_KEY: ${{ secrets.BOB_API_KEY }}
+          BOB_LIVE_API: 'true'
+        run: |
+          git fetch origin ${{ github.event.pull_request.base.ref }}
+          git reset origin/${{ github.event.pull_request.base.ref }}
+          git add -A
+          node cli/index.js --provider bob --export-logs
+
+      - name: Commit Report to Branch
+        if: github.event_name == 'push'
+        run: |
+          git config user.name  "blindspot-bot"
+          git config user.email "blindspot-bot@users.noreply.github.com"
+          # Force-track the report even if .gitignore previously excluded it
+          git add -f blindspot-report.md
+          if git diff --cached --quiet; then
+            echo "No changes to report — skipping commit."
+          else
+            git commit -m "chore: update blindspot-report.md [skip ci]"
+            # Pull & rebase any bot commits already on the remote, then push
+            git pull --rebase origin ${{ github.ref_name }}
+            git push origin HEAD:${{ github.ref_name }}
+          fi
+
+      - name: Post PR Review Comment
+        uses: marocchino/sticky-pull-request-comment@v2
+        if: github.event_name == 'pull_request' && always()
+        with:
+          path: blindspot-report.md
+          header: blindspot-architectural-review
+</file>
+
+<file path="package.json">
+{
+  "name": "blindspot",
+  "version": "0.1.0",
+  "private": true,
+  "bin": {
+    "blindspot": "./cli/index.js"
+  },
+  "scripts": {
+    "start": "node cli/index.js",
+    "review": "node cli/index.js --provider bob --export-logs",
+    "review:llama": "node cli/index.js --provider llama --export-logs",
+    "eval": "node evals/run.mjs"
+  },
+  "dependencies": {
+    "cli-progress": "^3.12.0",
+    "commander": "^15.0.0",
+    "dotenv": "^18.0.3",
+    "node-llama-cpp": "^3.19.0",
+    "pdf-parse": "^1.1.1",
+    "simple-git": "^3.36.0"
+  },
+  "devDependencies": {
+    "@types/node": "20.17.6",
+    "typescript": "5.8.2"
+  }
+}
+</file>
+
 <file path="cli/index.js">
 #!/usr/bin/env node
 
@@ -1875,9 +2770,9 @@ require("dotenv").config({ path: path.resolve(__dirname, "..", ".env") });
 const { execSync } = require("child_process");
 const fs = require("fs");
 const fsp = require("fs/promises");
-const http = require("http");
 const https = require("https");
 const os = require("os");
+const readline = require("readline");
 const { Command } = require("commander");
 const cliProgress = require("cli-progress");
 const simpleGit = require("simple-git");
@@ -2144,7 +3039,8 @@ async function run(cliOptions = {}) {
 
   const reportPath = path.join(process.cwd(), REPORT_FILENAME);
   await fsp.writeFile(reportPath, markdown, "utf8");
-  await ensureGitignoreEntry(gitRoot, REPORT_FILENAME);
+  // Do NOT add blindspot-report.md to .gitignore — it needs to be tracked
+  // so the post-commit hook and GitHub Actions bot can commit it to the branch.
   await ensureGitignoreEntry(gitRoot, SESSION_LOG_FILENAME);
 
   if (exportLogs && telemetry != null) {
@@ -2152,9 +3048,94 @@ async function run(cliOptions = {}) {
     await fsp.writeFile(logPath, JSON.stringify(telemetry, null, 2), "utf8");
   }
 
-  console.log(
-    `${GREEN}✅ Scan complete! Open blindspot-report.md to view your architectural review.${RESET}`,
-  );
+  console.log(`${GREEN}✅ Scan complete! Report saved to blindspot-report.md${RESET}`);
+
+  // Interactive Fix Mode
+  // Capture: title, file path, optional original block, suggestion block
+  const suggestionRegex = /### (.*?)\n[\s\S]*?- \*\*File:\*\* `(.*?)`[\s\S]*?(?:```original\n([\s\S]*?)```[\s\S]*?)?```suggestion\n([\s\S]*?)```/g;
+  const matches = [...markdown.matchAll(suggestionRegex)];
+
+  if (matches.length > 0) {
+    console.log(`\n${YELLOW}Blindspot found ${matches.length} auto-fixable issues.${RESET}`);
+
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+    const askQuestion = (query) => new Promise((resolve) => rl.question(query, resolve));
+
+    for (const match of matches) {
+      const [_, title, filePath, originalCode, suggestedCode] = match;
+      const fixedCode = suggestedCode.trim();
+
+      console.log(`\n--------------------------------------------------`);
+      console.log(`${YELLOW}Issue:${RESET} ${title}`);
+      console.log(`${YELLOW}File:${RESET} ${filePath}`);
+      if (originalCode) {
+        console.log(`${YELLOW}Original:${RESET}\n${originalCode.trim()}`);
+      }
+      console.log(`${GREEN}Suggested Fix:${RESET}\n${fixedCode}`);
+      console.log(`--------------------------------------------------`);
+
+      const answer = await askQuestion(`Apply this fix to ${filePath}? [y/N]: `);
+
+      if (answer.toLowerCase() === "y") {
+        try {
+          const absolutePath = path.resolve(gitRoot, filePath);
+          const fileContent = await fsp.readFile(absolutePath, "utf8");
+
+          let updatedContent;
+          if (originalCode) {
+            // Precise search-and-replace: swap original block with suggested fix
+            const original = originalCode.trim();
+            if (!fileContent.includes(original)) {
+              console.log(`\x1b[31mCould not locate original snippet in ${filePath}. Skipping.${RESET}`);
+              continue;
+            }
+            updatedContent = fileContent.replace(original, fixedCode);
+          } else {
+            // No original block provided — find the rule whose pattern matches this
+            // finding's title, then apply only that rule across the file's lines.
+            const INLINE_RULES = [
+              { title: /buffer/i,   pattern: /\bnew Buffer\s*\(/,   fix: (l) => l.replace(/\bnew Buffer\s*\(/, "Buffer.from(") },
+              { title: /url\.parse/i, pattern: /\burl\.parse\s*\(/, fix: (l) => l.replace(/\burl\.parse\s*\(/, "new URL(") },
+              { title: /fs\.exists/i, pattern: /\bfs\.exists\s*\(/, fix: (l) => l.replace(/\bfs\.exists\s*\(/, "fs.access(") },
+              { title: /substr/i,   pattern: /\.substr\s*\(/,       fix: (l) => l.replace(/\.substr\s*\(\s*([^,)]+)\s*,\s*([^)]+)\)/, ".slice($1, $1 + $2)") },
+              { title: /var/i,      pattern: /\bvar\s+/,            fix: (l) => l.replace(/\bvar\b/g, "const") },
+            ];
+            const rule = INLINE_RULES.find((r) => r.title.test(title));
+            if (!rule) {
+              console.log(`\x1b[31mNo rule matched finding "${title}". Skipping.${RESET}`);
+              continue;
+            }
+            const lines = fileContent.split("\n");
+            let changed = false;
+            const patched = lines.map((line) => {
+              if (rule.pattern.test(line)) {
+                changed = true;
+                return rule.fix(line);
+              }
+              return line;
+            });
+            if (!changed) {
+              console.log(`\x1b[31mPattern for "${title}" not found in ${filePath} — already fixed or not present. Skipping.${RESET}`);
+              continue;
+            }
+            updatedContent = patched.join("\n");
+          }
+
+          await fsp.writeFile(absolutePath, updatedContent, "utf8");
+          console.log(`${GREEN}✔ Fix applied to ${filePath}${RESET}`);
+        } catch (err) {
+          console.log(`\x1b[31mFailed to modify file: ${err.message}${RESET}`);
+        }
+      } else {
+        console.log(`Skipped.`);
+      }
+    }
+    rl.close();
+  }
 }
 
 const program = new Command();
@@ -2184,626 +3165,6 @@ program
   });
 
 program.parse();
-</file>
-
-<file path="evals/run.mjs">
-import { promises as fs } from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PROJECT_ROOT = path.resolve(__dirname, "..");
-const MOCK_REPO_DIR = path.join(PROJECT_ROOT, "evals", "mock-repo");
-const BLINDSPOT_DATA_PATH = path.join(PROJECT_ROOT, ".blindspot-data.json");
-const REVIEW_URL = "http://localhost:3000/api/review";
-
-const JSON_FALLBACK_REGEX = /\{[\s\S]*\}/;
-
-const SCENARIOS = [
-  {
-    name: "Middleware Bypass",
-    description:
-      "New dashboard settings route queries sensitive data, but middleware only protects /admin",
-    files: {
-      "middleware.ts": `import { NextResponse } from "next/server";
-import type { NextRequest } from "next/server";
-
-export function middleware(request: NextRequest) {
-  const token = request.cookies.get("auth-token");
-
-  if (!token) {
-    return NextResponse.redirect(new URL("/login", request.url));
-  }
-
-  return NextResponse.next();
-}
-
-export const config = {
-  matcher: ["/admin/:path*"],
-};
-`,
-    },
-    diff: `diff --git a/app/dashboard/settings/page.tsx b/app/dashboard/settings/page.tsx
-new file mode 100644
-index 0000000..a1b2c3d
---- /dev/null
-+++ b/app/dashboard/settings/page.tsx
-@@ -0,0 +1,18 @@
-+"use client";
-+
-+import { useEffect, useState } from "react";
-+
-+export default function SettingsPage() {
-+  const [secrets, setSecrets] = useState<Record<string, string>>({});
-+
-+  useEffect(() => {
-+    fetch("/api/internal/admin-secrets")
-+      .then((res) => res.json())
-+      .then(setSecrets);
-+  }, []);
-+
-+  return (
-+    <main>
-+      <h1>Account Settings</h1>
-+      <pre>{JSON.stringify(secrets, null, 2)}</pre>
-+    </main>
-+  );
-+}
-`,
-  },
-  {
-    name: "Supply Chain Poisoning",
-    description:
-      'Dependency swap from "lodash" to suspicious typosquat "lodash-utils"',
-    files: {
-      "package.json": JSON.stringify(
-        {
-          name: "acme-dashboard",
-          version: "1.0.0",
-          private: true,
-          dependencies: {
-            "lodash-utils": "^4.17.21",
-            react: "^19.0.0",
-            "next": "^15.0.0",
-          },
-        },
-        null,
-        2,
-      ),
-    },
-    diff: `diff --git a/package.json b/package.json
-index 1234567..89abcdef 100644
---- a/package.json
-+++ b/package.json
-@@ -4,7 +4,7 @@
-   "version": "1.0.0",
-   "private": true,
-   "dependencies": {
--    "lodash": "^4.17.21",
-+    "lodash-utils": "^4.17.21",
-     "react": "^19.0.0",
-     "next": "^15.0.0"
-   }
-`,
-  },
-];
-
-function parseAnalysisPayload(analysis) {
-  if (!analysis) {
-    return null;
-  }
-
-  if (typeof analysis === "object") {
-    return analysis;
-  }
-
-  const trimmed = analysis.trim();
-  const jsonMatch = trimmed.match(JSON_FALLBACK_REGEX);
-
-  if (!jsonMatch) {
-    return { analysis: trimmed };
-  }
-
-  try {
-    return JSON.parse(jsonMatch[0]);
-  } catch {
-    return { analysis: trimmed };
-  }
-}
-
-function normalizeIssues(analysis) {
-  const issues = analysis.issues ?? analysis.findings;
-
-  if (!Array.isArray(issues)) {
-    return [];
-  }
-
-  return issues.filter(
-    (issue) =>
-      typeof issue === "object" &&
-      issue !== null &&
-      typeof issue.title === "string",
-  );
-}
-
-function riskColor(riskLevel) {
-  const normalized = (riskLevel ?? "").toLowerCase();
-
-  if (normalized === "high" || normalized === "critical") {
-    return "\x1b[31m";
-  }
-
-  if (normalized === "medium") {
-    return "\x1b[33m";
-  }
-
-  if (normalized === "low") {
-    return "\x1b[34m";
-  }
-
-  return "\x1b[32m";
-}
-
-function severityColor(severity) {
-  return riskColor(severity);
-}
-
-const RESET = "\x1b[0m";
-const DIM = "\x1b[2m";
-const BOLD = "\x1b[1m";
-const CYAN = "\x1b[36m";
-
-function printDivider(char = "─", width = 72) {
-  console.log(DIM + char.repeat(width) + RESET);
-}
-
-function printScenarioHeader(index, scenario) {
-  console.log();
-  printDivider("═");
-  console.log(
-    `${BOLD}${CYAN}Scenario ${index + 1}: ${scenario.name}${RESET}`,
-  );
-  console.log(`${DIM}${scenario.description}${RESET}`);
-  printDivider("═");
-}
-
-function printFindings(scenario, parsed) {
-  const issues = normalizeIssues(parsed);
-  const riskLevel = parsed.riskLevel ?? "Unknown";
-  const summary = parsed.summary ?? parsed.analysis ?? "(no summary provided)";
-
-  console.log();
-  console.log(`${BOLD}Summary${RESET}`);
-  printDivider();
-  console.log(summary);
-
-  console.log();
-  console.log(
-    `${BOLD}Risk Level${RESET}  ${riskColor(riskLevel)}${riskLevel}${RESET}`,
-  );
-
-  console.log();
-  console.log(`${BOLD}Issues${RESET} (${issues.length})`);
-  printDivider();
-
-  if (issues.length === 0) {
-    console.log(`${DIM}  No structured issues returned.${RESET}`);
-    return;
-  }
-
-  for (const [issueIndex, issue] of issues.entries()) {
-    const severity = issue.severity ?? "unknown";
-    console.log();
-    console.log(
-      `  ${BOLD}${issueIndex + 1}. ${issue.title}${RESET}  ${severityColor(severity)}[${severity}]${RESET}`,
-    );
-
-    if (issue.file) {
-      console.log(`     ${DIM}File:${RESET} ${issue.file}`);
-    }
-
-    if (issue.description) {
-      console.log(`     ${DIM}Description:${RESET} ${issue.description}`);
-    }
-
-    if (issue.recommendation) {
-      console.log(`     ${DIM}Fix:${RESET} ${issue.recommendation}`);
-    }
-  }
-}
-
-async function writeScenarioFiles(files) {
-  await fs.mkdir(MOCK_REPO_DIR, { recursive: true });
-
-  for (const [relativePath, content] of Object.entries(files)) {
-    const absolutePath = path.join(MOCK_REPO_DIR, relativePath);
-    await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-    await fs.writeFile(absolutePath, content, "utf8");
-  }
-}
-
-async function updateBlindspotData(diff, repoPath) {
-  const payload = {
-    diff,
-    repositoryRoot: repoPath,
-    repoPath,
-    savedAt: new Date().toISOString(),
-  };
-
-  await fs.writeFile(
-    BLINDSPOT_DATA_PATH,
-    `${JSON.stringify(payload, null, 2)}\n`,
-    "utf8",
-  );
-}
-
-async function cleanupMockRepo() {
-  await fs.rm(MOCK_REPO_DIR, { recursive: true, force: true });
-}
-
-async function runScenario(index, scenario) {
-  const repoPath = path.resolve(MOCK_REPO_DIR);
-
-  printScenarioHeader(index, scenario);
-
-  try {
-    await writeScenarioFiles(scenario.files);
-    await updateBlindspotData(scenario.diff, repoPath);
-
-    console.log();
-    console.log(`${DIM}Mock repo:${RESET} ${repoPath}`);
-    console.log(`${DIM}POST${RESET}       ${REVIEW_URL}`);
-
-    const response = await fetch(REVIEW_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        diff: scenario.diff,
-        repoPath,
-      }),
-    });
-
-    const payload = await response.json();
-
-    if (!response.ok) {
-      console.error(
-        `\n\x1b[31mAPI error (${response.status}):${RESET} ${payload.error ?? "Unknown error"}`,
-      );
-      return { scenario: scenario.name, ok: false, error: payload.error };
-    }
-
-    const parsed = parseAnalysisPayload(payload.analysis);
-
-    if (!parsed) {
-      console.error("\n\x1b[31mCould not parse analysis from API response.\x1b[0m");
-      return { scenario: scenario.name, ok: false, error: "Unparseable analysis" };
-    }
-
-    printFindings(scenario, parsed);
-    return { scenario: scenario.name, ok: true, riskLevel: parsed.riskLevel };
-  } finally {
-    await cleanupMockRepo();
-  }
-}
-
-async function loadOriginalBlindspotData() {
-  try {
-    const raw = await fs.readFile(BLINDSPOT_DATA_PATH, "utf8");
-    return { existed: true, content: raw };
-  } catch {
-    return { existed: false, content: null };
-  }
-}
-
-async function restoreBlindspotData(original) {
-  if (original.existed) {
-    await fs.writeFile(BLINDSPOT_DATA_PATH, original.content, "utf8");
-    return;
-  }
-
-  await fs.rm(BLINDSPOT_DATA_PATH, { force: true });
-}
-
-async function main() {
-  console.log(`${BOLD}Blindspot Agentic ReAct Evaluation Suite${RESET}`);
-  console.log(`${DIM}Project root: ${PROJECT_ROOT}${RESET}`);
-
-  const originalData = await loadOriginalBlindspotData();
-  const results = [];
-
-  try {
-    for (const [index, scenario] of SCENARIOS.entries()) {
-      results.push(await runScenario(index, scenario));
-    }
-  } finally {
-    await restoreBlindspotData(originalData);
-  }
-
-  console.log();
-  printDivider("═");
-  console.log(`${BOLD}Evaluation Summary${RESET}`);
-  printDivider("═");
-
-  for (const result of results) {
-    const status = result.ok
-      ? `\x1b[32mPASS\x1b[0m`
-      : `\x1b[31mFAIL\x1b[0m`;
-    const detail = result.ok
-      ? `(risk: ${result.riskLevel ?? "unknown"})`
-      : `(${result.error})`;
-    console.log(`  ${status}  ${result.scenario}  ${DIM}${detail}${RESET}`);
-  }
-
-  console.log();
-
-  const failed = results.filter((result) => !result.ok).length;
-
-  if (failed > 0) {
-    process.exitCode = 1;
-  }
-}
-
-main().catch((error) => {
-  console.error("\n\x1b[31mEval runner crashed:\x1b[0m", error);
-  process.exitCode = 1;
-});
-</file>
-
-<file path=".blindspot-data.json">
-{
-  "diff": "",
-  "repositoryRoot": "C:\\Users\\STEORA SYSTEMS\\OneDrive\\Documents\\own\\blindspot",
-  "repoPath": "C:\\Users\\STEORA SYSTEMS\\OneDrive\\Documents\\own\\blindspot",
-  "savedAt": "2026-07-06T17:41:26.335Z"
-}
-</file>
-
-<file path=".cursorrules">
-# Project: Blindspot - Local AI Code Reviewer
-We are building a hybrid local developer tool consisting of a Node CLI and a Next.js App Router dashboard.
-
-**Tech Stack:**
-- **Framework:** Next.js 15 (App Router) + React 19
-- **UI:** Tailwind CSS, shadcn/ui, Lucide Icons
-- **CLI:** Node.js, `commander`, `simple-git`, `cli-progress`
-- **AI/Inference:** `node-llama-cpp` (for native, zero-config SLM execution).
-
-**Core Rules:**
-1. NO cloud AI dependencies (No OpenAI, No Anthropic). All inference runs locally.
-2. Use `node-llama-cpp` natively in Next.js API routes. Utilize its `LlamaChatSession` and built-in function-calling capabilities to create the agentic loop.
-3. The Next.js API must load the local GGUF model and expose tools (like file reading) directly to the `node-llama-cpp` session.
-</file>
-
-<file path=".env.example">
-# IBM Bob 2.0 (default review provider)
-BOB_API_KEY=https://bob.ibm.com/login?callback_uri=http://127.0.0.1:60630/bob-callback&state=ded189cf-d6eb-4335-966b-1184a64cfd4e
-BOB_LIVE_API=true
-# BOB_TEAM_ID=
-# BOB_API_URL=https://bob.ibm.com/login?callback_uri=http://127.0.0.1:60630/bob-callback&state=ded189cf-d6eb-4335-966b-1184a64cfd4e
-# BOB_MODEL=bob-2.0
-
-# Provider selection: bob | llama
-# ENGINE_PROVIDER=bob
-</file>
-
-<file path=".gitignore">
-# dependencies
-/node_modules
-/.pnp
-.pnp.*
-.yarn/*
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/versions
-
-# testing
-/coverage
-
-# next.js
-/.next/
-/out/
-
-# production
-/build
-
-# misc
-.DS_Store
-*.pem
-
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-
-# env files
-.env
-.env*.local
-
-# vercel
-.vercel
-
-# typescript
-*.tsbuildinfo
-</file>
-
-<file path="ARCHITECTURE.md">
-# Blindspot Architecture & Security Rules
-
-These rules are mandatory for Subagent B (Architecture & PDF/Markdown Compliance). Every review of routes, manifests, handlers, and language usage must enforce them. A finding is required whenever a change violates a rule below.
-
-## Rule 1 — Authentication & Access Control
-
-All API routes under `/api/` or `/dashboard/` must enforce authentication middleware.
-
-- Every route handler, page, and layout reachable at `/api/*` or `/dashboard/*` must pass through an authentication check before reading data, mutating state, or returning a response.
-- Unprotected endpoint exports are strictly forbidden. A handler that is exported without an auth guard, or that is excluded from the matcher that applies that guard, is a violation.
-- Middleware bypasses are strictly forbidden. Narrowing a matcher so that `/api/` or `/dashboard/` paths skip authentication, short-circuiting with an early `next()` before the auth check, or commenting out the guard is a violation.
-- Session, cookie, or token validation must fail closed: missing or invalid credentials deny the request.
-
-## Rule 2 — Supply Chain & Dependencies
-
-Floating version specifiers and unvetted third-party npm utilities are strictly prohibited in production manifests (`package.json` and equivalent lock-producing manifests used for production installs).
-
-- Version ranges that float with `*`, `latest`, or a leading `^` are prohibited. Production dependencies must be pinned to an exact, reviewed version.
-- Unvetted third-party npm utilities are prohibited. This includes typosquatted helper libraries, packages with no established maintainer history, and one-off utilities added without a recorded review of name, publisher, and purpose.
-- A new production dependency is acceptable only when its name, version, and necessity are explicit and match a known, vetted package.
-
-## Rule 3 — Execution & Side Effects
-
-Dynamic code execution is forbidden in HTTP handlers without explicit validation.
-
-- `eval`, `child_process.exec`, and `vm.runInContext` must not appear in request handlers, route modules, or code those handlers call on the request path, unless the invocation is preceded by explicit validation of every input that can influence the executed string, command, or context.
-- Validation must be allowlist-based and must reject the request before execution when input does not match the allowlist.
-- Passing request bodies, query strings, headers, or file paths into these APIs without that validation is a violation.
-
-## Rule 4 — Modernization
-
-Legacy ES5 declarations must be modernized to ES2024+ standards.
-
-- `var` must be replaced with `const` or `let`.
-- `new Buffer()` must be replaced with `Buffer.from()`, `Buffer.alloc()`, or `Buffer.allocUnsafe()` as appropriate.
-- `url.parse` must be replaced with the WHATWG `URL` / `URLSearchParams` APIs.
-- New code introduced in a change must already meet this standard. A diff that adds any of the legacy forms above is a violation.
-</file>
-
-<file path="package.json">
-{
-  "name": "blindspot",
-  "version": "0.1.0",
-  "private": true,
-  "bin": {
-    "blindspot": "./cli/index.js"
-  },
-  "scripts": {
-    "start": "node cli/index.js",
-    "review": "node cli/index.js --provider bob --export-logs",
-    "review:llama": "node cli/index.js --provider llama --export-logs",
-    "eval": "node evals/run.mjs"
-  },
-  "dependencies": {
-    "cli-progress": "^3.12.0",
-    "commander": "^15.0.0",
-    "dotenv": "^18.0.3",
-    "node-llama-cpp": "^3.19.0",
-    "pdf-parse": "^1.1.1",
-    "simple-git": "^3.36.0"
-  }
-}
-</file>
-
-<file path="README.md">
-# Blindspot — Elite Autonomous PR Security & Architecture Reviewer
-
-Powered by IBM Bob 2.0.
-
-Blindspot reviews a git diff with three specialized subagents running in parallel, then a Manager Agent synthesizes one architectural report and a session telemetry log. Inference stays local: IBM Bob for the default path, or a GGUF model through `node-llama-cpp` when you choose the Llama provider. No OpenAI or Anthropic dependency is required.
-
-## How a review runs
-
-```mermaid
-flowchart LR
-  Diff["Git diff"]
-  Supply["Supply Chain subagent"]
-  Arch["Architecture and PDF/Markdown Compliance subagent"]
-  Legacy["Legacy Modernization subagent"]
-  Manager["Manager Agent"]
-  Report["blindspot-report.md"]
-  Logs["bob-session-logs.json"]
-
-  Diff --> Supply
-  Diff --> Arch
-  Diff --> Legacy
-  Supply --> Manager
-  Arch --> Manager
-  Legacy --> Manager
-  Manager --> Report
-  Manager --> Logs
-```
-
-The git diff is passed concurrently into the three subagents. The Manager Agent merges their findings into `blindspot-report.md` and exports session telemetry as `bob-session-logs.json`.
-
-## Key features
-
-- **Parallel subagent orchestration.** Supply Chain, Architecture & PDF/Markdown Compliance, and Legacy Modernization review the same diff at the same time. The Manager Agent writes the final report.
-- **Document understanding.** Reviews read project policy from `.cursorrules`, `ARCHITECTURE.md`, and PDF policy documents so findings follow the rules already in the repository.
-- **1-click GitHub remediation suggestions.** The GitHub Action posts `blindspot-report.md` on the pull request so reviewers can apply the suggested fixes from the comment.
-- **Silent supply-chain defense.** Dependency manifests are checked for floating specifiers and unvetted packages without a separate manual audit step.
-- **Session telemetry logging.** `npm run review` and `npm run review:llama` pass `--export-logs` and write `bob-session-logs.json` beside the report. Drop IBM Bob session screenshots in `bob_sessions/`.
-
-## Quickstart
-
-Requirements: Node.js 20+, a git checkout with uncommitted changes to review.
-
-```bash
-npm install
-npm run review
-```
-
-`npm run review` runs `node cli/index.js --provider bob --export-logs`. It writes `blindspot-report.md` and, when telemetry is produced, `bob-session-logs.json`.
-
-For fully local GGUF inference, the first Llama run downloads Llama-3.2-1B-Instruct (Q4_K_M) into `~/.blindspot/model.gguf` if it is not already there:
-
-```bash
-npm run review:llama
-```
-
-`npm run start` launches the CLI with its default provider. `npm run eval` runs the local evaluation harness in `evals/run.mjs`.
-
-Copy `.env.example` to `.env` and paste your IBM Bob API key:
-
-```bash
-cp .env.example .env
-```
-
-Set `BOB_API_KEY` in `.env` (or in the shell) when the Bob provider is configured for a live API (`BOB_LIVE_API=true`). The CLI loads `.env` from the project root automatically. It also accepts `ENGINE_PROVIDER` (`bob` or `llama`) when you invoke `node cli/index.js` directly.
-
-## GitHub Action
-
-The workflow at `.github/workflows/blindspot-review.yml` runs on pull request open, synchronize, and reopen.
-
-1. Copy that workflow into the repository if it is not already present.
-2. Add a repository secret named `BOB_API_KEY`.
-3. Open or update a pull request. The job checks out the repo with full history, installs dependencies with `npm ci`, and runs:
-
-```bash
-node cli/index.js --provider bob --export-logs
-```
-
-4. The sticky pull-request comment step publishes `blindspot-report.md` under the header `blindspot-architectural-review`.
-
-The job sets `ENGINE_PROVIDER=bob` and `BOB_LIVE_API=true`, and requests `contents: read` plus `pull-requests: write`.
-</file>
-
-<file path="tsconfig.json">
-{
-  "compilerOptions": {
-    "target": "ES2017",
-    "lib": ["dom", "dom.iterable", "esnext"],
-    "allowJs": true,
-    "skipLibCheck": true,
-    "strict": true,
-    "noEmit": true,
-    "esModuleInterop": true,
-    "module": "esnext",
-    "moduleResolution": "bundler",
-    "resolveJsonModule": true,
-    "isolatedModules": true,
-    "jsx": "preserve",
-    "incremental": true,
-    "plugins": [
-      {
-        "name": "next"
-      }
-    ],
-    "paths": {
-      "@/*": ["./*"]
-    }
-  },
-  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
-  "exclude": ["node_modules"]
-}
 </file>
 
 </files>
